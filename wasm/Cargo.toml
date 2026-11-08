@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 diorama-core = { path = "../core" }
 # The Horizon-iOS fork's SDK at API level 17 (canvas + client-world), branch
 # claude/mod-canvas-api. Upstream Horizon has no WASM mods.
-horizon-mod-sdk = { path = "../../iaf-swarm/mod-canvas-api/crates/horizon-mod-sdk" }
+horizon-mod-sdk = { git = "https://github.com/Worrcc/Horizon-iOS-worc", rev = "5082b61b08c8dcf628e18accfe2fbe667bfee57d" }
