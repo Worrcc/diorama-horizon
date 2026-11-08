@@ -1,0 +1,60 @@
+# M4: colours from the resource pack. The script's packs hold one-colour
+# textures; the mod averages them (RULES.md section 3) and reports what the
+# map uses with /diorama colour. A block set in a later step moves the block
+# table's version, as a resource reload does: the looks are built again over
+# the next frames.
+
+[textures]
+"block/stone" = { color = 0xFF7F7F7F }
+"block/grass_block" = { color = 0xFF9A9A9A }
+"block/water" = { color = 0xFFC0C0C0 }
+# Under the alpha cut (26): no pixel shows, and no map colour either.
+"block/barrier_glass" = { color = 0x10FFFFFF }
+
+[player]
+x = 8.5
+y = 65.0
+z = 8.5
+
+[[step]]
+blocks = [
+  { x = 6, y = 63, z = 6, state = "minecraft:stone" },
+  { x = 7, y = 63, z = 6, state = "minecraft:stone" },
+  { x = 8, y = 63, z = 8, state = "minecraft:grass_block" },
+  { x = 9, y = 63, z = 8, state = "minecraft:grass_block" },
+  { x = 9, y = 63, z = 9, state = "minecraft:water" },
+  { x = 9, y = 62, z = 9, state = "minecraft:stone" },
+]
+ticks = 1
+frames = 4
+expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1 }
+
+[[step]]
+command = "diorama colour stone"
+expect.feedback = "minecraft:stone (state 1): Solid, top #7F7F7F, side #7F7F7F, tint None"
+
+[[step]]
+command = "diorama colour grass_block"
+expect.feedback = "minecraft:grass_block (state 2): Solid, top #9A9A9A tinted, side #9A9A9A, tint Grass"
+
+[[step]]
+command = "diorama colour water"
+expect.feedback = "minecraft:water (state 3): Water, top #C0C0C0 tinted, side #C0C0C0 tinted, tint Water"
+
+# A new block: the table's version moves, the looks are rebuilt.
+[[step]]
+blocks = [
+  { x = 6, y = 63, z = 6, state = "minecraft:stone" },
+  { x = 8, y = 63, z = 8, state = "minecraft:barrier_glass" },
+]
+ticks = 1
+frames = 8
+expect.canvas = { shapes = 6, images = 1 }
+
+[[step]]
+command = "diorama colour barrier_glass"
+expect.feedback = "minecraft:barrier_glass (state 4): Air, top #000000, side #000000, tint None"
+
+[[step]]
+command = "diorama"
+expect.feedback = "Diorama looks version 5, 5 states"

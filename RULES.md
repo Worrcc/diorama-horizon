@@ -311,3 +311,23 @@ Section 1 deferred list, with extra detail from the source read:
 7. The plan says south faces are drawn "from the top down to the south neighbour's top": consistent with the ray rule
    (section 2), but water and plants add overlay rules (section 2) the plan does not list.
 8. The default style's `roundedFog` is true, but it only affects fog and is irrelevant to a loaded-chunk minimap.
+
+## 14. How the port applies the colour rules (M4)
+
+Code: `core/src/looks.rs` (sections 3-4), `core/src/style.rs` (sections 5-7), `core/src/paint.rs`, outlines in
+`core/src/mosaic.rs` (`shown_at`). Every block colour is averaged at run time from the loaded packs'
+textures (`client-world.texture`); no colour table or texture is in the repo. Differences from Diorama:
+
+- The host names one quad per side (its first); a model with no flat up/south quad (crossed plants) gives its
+  first face for both. Diorama sums every quad, so a grass block's side lacks its tinted overlay.
+- Kinds come from the host's flags (`classify`); leaves are recognised by a block id ending in `_leaves`
+  (stand-in for `BlockTags.LEAVES`). A texture the packs lack falls back to the map colour, not magenta.
+- Textures are averaged at the size the host holds them (all block sprites resized to one size).
+- Light: no corner AO, no sun shadows; sky visibility is the column's sky light / 15. Sun at elevation 38,
+  azimuth (-0.878, 0.479), no per-sample jitter.
+- Water: the floor is the same column's, straight down, at path `depth / sin(pitch)`; a water column deeper than
+  the 12 blocks read has a black floor at the host's depth; a water south face uses an 8-block path.
+- Plants and glass above a column tint only its top face. An overhang's face over air takes the block above.
+- Outlines: one sample per texel (texels are half a block, Diorama's pixels a quarter), depth
+  `-(y/sin + v*cot)` per texel, water path stored in eighths of a block.
+- Lava's noise nudge and dry-foliage tints (the host sends no dry-foliage colour) are not applied.

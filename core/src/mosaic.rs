@@ -17,8 +17,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::bake::{self, Chunk, Faces, Shade, TEXELS_PER_BLOCK};
+use crate::bake::{self, Chunk, Faces, Shade, Texel, TEXELS_PER_BLOCK};
 use crate::projection::Projection;
+use crate::style::{darken, outline_keep, OUTLINE_DEPTH};
 
 /// Texel columns per strip (one chunk across).
 pub const STRIP: u32 = 16 * TEXELS_PER_BLOCK;
@@ -57,6 +58,11 @@ pub struct Mosaic {
     rgba: Vec<u8>,
     /// Per texel: the height of the nearest face painted there (`-inf`: none).
     height: Vec<f32>,
+    /// Per texel: the height of what is seen there (the floor under water),
+    /// and the ray's path through water in front of it in eighths of a block,
+    /// for outlines.
+    seen: Vec<f32>,
+    wet: Vec<u8>,
     chunks: BTreeMap<(i32, i32), Cached>,
     paint: Vec<Rows>,
     upload: Vec<Rows>,
@@ -84,14 +90,22 @@ struct Canvas<'a> {
     v0: f64,
     rgba: &'a mut [u8],
     height: &'a mut [f32],
+    seen: &'a mut [f32],
+    wet: &'a mut [u8],
     stats: &'a mut Stats,
 }
 
+/// [`Mosaic`]'s `wet` scale: eighths of a block, to 31.9 blocks.
+const WET_SCALE: f32 = 8.0;
+
 impl Canvas<'_> {
-    fn put(&mut self, i: u32, j: u32, y: f32, rgb: u32) {
+    fn put(&mut self, i: u32, j: u32, y: f32, t: Texel) {
         let at = (j * self.side + i) as usize;
         if y > self.height[at] {
+            let rgb = t.rgb;
             self.height[at] = y;
+            self.seen[at] = t.seen;
+            self.wet[at] = (t.water * WET_SCALE).round().clamp(0.0, 255.0) as u8;
             self.rgba[at * 4..at * 4 + 4].copy_from_slice(&[
                 (rgb >> 16) as u8,
                 (rgb >> 8) as u8,
@@ -122,10 +136,10 @@ impl Canvas<'_> {
         let (a, b) = clip(bake::rows(s.top.0, s.top.1, self.v0));
         if a < b {
             let y = (f.top + 1) as f32;
-            let rgb = shade.top(chunk.state(col, 0));
+            let t = shade.top(chunk, col, f64::from(y));
             for j in a..b {
-                self.put(i, j, y, rgb);
-                self.put(i + 1, j, y, rgb);
+                self.put(i, j, y, t);
+                self.put(i + 1, j, y, t);
             }
         }
         if f.south_blocks() == 0 {
@@ -137,9 +151,9 @@ impl Canvas<'_> {
             let v = bake::row_v(i64::from(j), self.v0);
             let y = bake::y_on_south(self.proj, v, zf);
             let block = (y.floor() as i32).clamp(f.south_from, f.top);
-            let rgb = shade.south(chunk.state(col, f.top - block));
-            self.put(i, j, y as f32, rgb);
-            self.put(i + 1, j, y as f32, rgb);
+            let t = shade.south(chunk, col, block, y);
+            self.put(i, j, y as f32, t);
+            self.put(i + 1, j, y as f32, t);
         }
     }
 }
@@ -175,6 +189,8 @@ impl Mosaic {
             v0: 0,
             rgba: vec![0; n * 4],
             height: vec![f32::NEG_INFINITY; n],
+            seen: vec![0.0; n],
+            wet: vec![0; n],
             chunks: BTreeMap::new(),
             paint: vec![None; strips],
             upload: vec![None; strips],
@@ -213,6 +229,14 @@ impl Mosaic {
     /// Chunks in the cache.
     pub fn chunks(&self) -> usize {
         self.chunks.len()
+    }
+    /// The cached chunks' keys.
+    pub fn keys(&self) -> Vec<(i32, i32)> {
+        self.chunks.keys().copied().collect()
+    }
+    /// Marks the whole image to paint again (the looks changed).
+    pub fn repaint_all(&mut self) {
+        self.paint.fill(Some((0, self.side)));
     }
     pub fn has(&self, key: (i32, i32)) -> bool {
         self.chunks.contains_key(&key)
@@ -302,6 +326,8 @@ impl Mosaic {
         self.chunks.clear();
         self.rgba.fill(0);
         self.height.fill(f32::NEG_INFINITY);
+        self.seen.fill(0.0);
+        self.wet.fill(0);
         self.paint.fill(None);
         self.upload.fill(Some((0, self.side)));
     }
@@ -322,7 +348,18 @@ impl Mosaic {
         let end = r1.min(r0 + max_rows.max(1));
         self.paint[s] = (end < r1).then_some((end, r1));
         self.repaint(s as u32, (r0, end), shade);
-        hull(&mut self.upload[s], (r0, end));
+        // Outlines read the texels around: the rows next to these and the
+        // strips beside go up again too.
+        let rows = (r0.saturating_sub(1), (end + 1).min(self.side));
+        hull(&mut self.upload[s], rows);
+        if shade.outline() > 0.0 {
+            if s > 0 {
+                hull(&mut self.upload[s - 1], rows);
+            }
+            if s + 1 < self.upload.len() {
+                hull(&mut self.upload[s + 1], rows);
+            }
+        }
         self.stats.jobs += 1;
         true
     }
@@ -347,6 +384,8 @@ impl Mosaic {
             v0,
             rgba,
             height,
+            seen,
+            wet,
             chunks,
             stats,
             ..
@@ -357,6 +396,8 @@ impl Mosaic {
             v0: f64::from(*v0),
             rgba,
             height,
+            seen,
+            wet,
             stats,
         };
         for (&key, c) in chunks.range((cx, i32::MIN)..=(cx, i32::MAX)) {
@@ -422,6 +463,8 @@ impl Mosaic {
         let n = (self.side * self.side) as usize;
         let mut rgba = vec![0u8; n * 4];
         let mut height = vec![f32::NEG_INFINITY; n];
+        let mut seen = vec![0.0f32; n];
+        let mut wet = vec![0u8; n];
         let (i_from, i_to) = ((-di).max(0), (side - di).min(side));
         for j in 0..side {
             let sj = j + dj;
@@ -432,10 +475,14 @@ impl Mosaic {
             let src = (sj * side + i_from + di) as usize;
             let w = (i_to - i_from) as usize;
             height[dst..dst + w].copy_from_slice(&self.height[src..src + w]);
+            seen[dst..dst + w].copy_from_slice(&self.seen[src..src + w]);
+            wet[dst..dst + w].copy_from_slice(&self.wet[src..src + w]);
             rgba[dst * 4..(dst + w) * 4].copy_from_slice(&self.rgba[src * 4..(src + w) * 4]);
         }
         self.rgba = rgba;
         self.height = height;
+        self.seen = seen;
+        self.wet = wet;
 
         let strips = self.paint.len() as i64;
         let ds = i64::from(du / 16);
@@ -463,12 +510,55 @@ impl Mosaic {
         }
     }
 
+    /// Texel `(i, j)`'s depth along the view, as Diorama measures it
+    /// (TileBaker.java:1088, `-(sin*y + cos*z)` at the hit): with the hit on
+    /// map row `v` at height `y`, `-(y/sin + v*cot)`. Nearer is smaller.
+    fn depth(&self, at: usize, v: f64) -> f32 {
+        let p = &self.proj;
+        (-(f64::from(self.seen[at]) / p.sin + v * p.cos / p.sin)) as f32
+    }
+
+    /// Texel `(i, j)` as uploaded: its colour darkened by `outline` where a
+    /// neighbour (left, right, up, down) is more than [`OUTLINE_DEPTH`] nearer,
+    /// faded by the water in front (TileBaker.java:822-840). 0 when nothing
+    /// is painted there.
+    pub fn shown_at(&self, i: u32, j: u32, outline: f32) -> [u8; 4] {
+        let side = self.side;
+        let at = (j * side + i) as usize;
+        let mut px = [0u8; 4];
+        px.copy_from_slice(&self.rgba[at * 4..at * 4 + 4]);
+        if px[3] == 0 || outline <= 0.0 {
+            return px;
+        }
+        let t = f64::from(TEXELS_PER_BLOCK);
+        let v = |j: u32| f64::from(self.v0) + (f64::from(j) + 0.5) / t;
+        let here = self.depth(at, v(j));
+        let nearer = |ni: u32, nj: u32| {
+            let n = (nj * side + ni) as usize;
+            self.rgba[n * 4 + 3] != 0 && here - self.depth(n, v(nj)) > OUTLINE_DEPTH
+        };
+        let edge = (i > 0 && nearer(i - 1, j))
+            || (i + 1 < side && nearer(i + 1, j))
+            || (j > 0 && nearer(i, j - 1))
+            || (j + 1 < side && nearer(i, j + 1));
+        if edge {
+            let keep = outline_keep(outline, f32::from(self.wet[at]) / WET_SCALE);
+            let rgb = (u32::from(px[0]) << 16) | (u32::from(px[1]) << 8) | u32::from(px[2]);
+            let d = darken(rgb, keep);
+            px[..3].copy_from_slice(&[(d >> 16) as u8, (d >> 8) as u8, d as u8]);
+        }
+        px
+    }
+
     /// Hands the dirty rects to `put(x, y, width, height, rgba)`, at most
     /// `max_bytes` of texels in all; the rest waits for the next call. Strips
-    /// side by side with the same rows go as one rect. Returns the bytes given.
+    /// side by side with the same rows go as one rect. Texels go as
+    /// [`Mosaic::shown_at`] draws them, with outlines of strength `outline`.
+    /// Returns the bytes given.
     pub fn take_upload(
         &mut self,
         max_bytes: usize,
+        outline: f32,
         mut put: impl FnMut(u32, u32, u32, u32, &[u8]),
     ) -> usize {
         let mut given = 0;
@@ -493,8 +583,14 @@ impl Mosaic {
             let end = r1.min(r0 + rows);
             buf.clear();
             for j in r0..end {
-                let at = ((j * self.side + x) * 4) as usize;
-                buf.extend_from_slice(&self.rgba[at..at + row]);
+                if outline > 0.0 {
+                    for i in x..x + w {
+                        buf.extend_from_slice(&self.shown_at(i, j, outline));
+                    }
+                } else {
+                    let at = ((j * self.side + x) * 4) as usize;
+                    buf.extend_from_slice(&self.rgba[at..at + row]);
+                }
             }
             put(x, r0, w, end - r0, &buf);
             given += buf.len();
@@ -517,11 +613,12 @@ mod tests {
     /// Each column's state is its own id; top colour `id << 1`, south `id << 1 | 1`.
     struct Ids;
     impl Shade for Ids {
-        fn top(&self, s: u32) -> u32 {
-            s << 1
+        fn top(&self, c: &Chunk, col: usize, y: f64) -> Texel {
+            Texel::dry(c.state(col, 0) << 1, y)
         }
-        fn south(&self, s: u32) -> u32 {
-            (s << 1) | 1
+        fn south(&self, c: &Chunk, col: usize, block: i32, y: f64) -> Texel {
+            let top = i32::from(c.tops[col]);
+            Texel::dry((c.state(col, top - block) << 1) | 1, y)
         }
     }
     fn id(x: i32, z: i32) -> u32 {
@@ -871,6 +968,99 @@ mod tests {
         assert!(m.rgb_at(0, 0).is_none());
     }
 
+    /// One grey for every face, with outlines; water `wet` blocks deep over
+    /// columns at x >= 24 (seen at the floor `wet` lower).
+    struct Grey {
+        wet: f32,
+    }
+    impl Shade for Grey {
+        fn top(&self, c: &Chunk, col: usize, y: f64) -> Texel {
+            let x = (c.state(col, 0) & 511) as i32 - 100;
+            if x >= 24 && self.wet > 0.0 {
+                return Texel {
+                    rgb: 0x64_6464,
+                    seen: (y - f64::from(self.wet)) as f32,
+                    water: self.wet / 0.766,
+                };
+            }
+            Texel::dry(0x64_6464, y)
+        }
+        fn south(&self, _: &Chunk, _: usize, _: i32, y: f64) -> Texel {
+            Texel::dry(0x64_6464, y)
+        }
+        fn outline(&self) -> f32 {
+            0.38
+        }
+    }
+
+    #[test]
+    fn outlines_ring_the_ground_behind_a_tower_and_not_flat_ground() {
+        let p = Projection::default();
+        let mut m = Mosaic::new(p, 64);
+        world(&mut m, 0..2, 0..3, scene);
+        m.recentre(16.0, p.v(64.0, 24.0));
+        paint_all(&mut m, &Grey { wet: 0.0 });
+        let i = ((8 - m.anchor().0) * 2) as u32;
+        // The highest texel row of the tower's top, and the ground row above it
+        // (further along the view): that one is outlined, 100 * 0.62 = 62.
+        let tower = (0..64)
+            .find(|&j| m.height_at(i, j) == 71.0)
+            .expect("tower top");
+        assert_eq!(m.shown_at(i, tower - 1, 0.38)[..3], [62, 62, 62]);
+        assert_eq!(m.shown_at(i, tower, 0.38)[..3], [100, 100, 100]);
+        // Flat ground two blocks west is not.
+        let flat = i - 4;
+        assert!((0..64)
+            .filter(|&j| m.height_at(flat, j) == 65.0)
+            .all(|j| m.shown_at(flat, j, 0.38)[..3] == [100, 100, 100]));
+        // Strength 0 is the plain image.
+        assert_eq!(m.shown_at(i, tower - 1, 0.0)[..3], [100, 100, 100]);
+    }
+
+    #[test]
+    fn a_one_block_step_is_outlined_and_water_fades_it() {
+        // Ground at 64 north of z 20 and 65 from there south; the rows just
+        // behind the step's edge are outlined (1/sin + 0.5 cot > 1.5).
+        let p = Projection::default();
+        let step = |_: i32, z: i32| Some(if z >= 20 { 65 } else { 64 });
+        let outlined = |wet: f32| {
+            let mut m = Mosaic::new(p, 64);
+            world(&mut m, 0..2, 0..3, step);
+            m.recentre(16.0, p.v(64.0, 20.0));
+            paint_all(&mut m, &Grey { wet });
+            let i = ((26 - m.anchor().0) * 2) as u32;
+            (0..64)
+                .filter(|&j| m.rgb_at(i, j).is_some())
+                .map(|j| m.shown_at(i, j, 0.38)[0])
+                .min()
+                .unwrap()
+        };
+        assert_eq!(outlined(0.0), 62);
+        // Under 3 blocks of water the darkening is exp(-path/6) as strong.
+        let path: f32 = 3.0 / 0.766;
+        let keep = 1.0 - 0.38 * (-((path * 8.0).round() / 8.0) / 6.0).exp();
+        assert_eq!(outlined(3.0), (100.0 * keep).round() as u8);
+    }
+
+    #[test]
+    fn painting_with_outlines_uploads_the_neighbouring_rows_and_strips() {
+        let p = Projection::default();
+        let mut m = Mosaic::new(p, 96);
+        world(&mut m, 0..3, 0..3, |_, _| Some(64));
+        m.recentre(24.0, p.v(64.0, 24.0));
+        paint_all(&mut m, &Grey { wet: 0.0 });
+        while m.take_upload(1 << 20, 0.38, |_, _, _, _, _| {}) > 0 {}
+        m.set_chunk(
+            (1, 1),
+            Some(Chunk::from_fn(1, |_, _| Some((64, id(20, 20))))),
+        );
+        let rows = m.paint_rows(1).expect("dirty");
+        paint_all(&mut m, &Grey { wet: 0.0 });
+        let mut rects = Vec::new();
+        m.take_upload(1 << 20, 0.38, |x, y, w, h, _| rects.push((x, y, w, h)));
+        assert_eq!(rects, vec![(0, rows.0 - 1, 96, rows.1 - rows.0 + 2)]);
+    }
+
     #[test]
     fn uploads_go_in_rects_under_the_byte_cap() {
         let mut m = scene_mosaic();
@@ -878,7 +1068,7 @@ mod tests {
         let mut got = vec![0u8; 64 * 64 * 4];
         let mut calls = 0;
         loop {
-            let n = m.take_upload(4096, |x, y, w, h, rgba| {
+            let n = m.take_upload(4096, 0.0, |x, y, w, h, rgba| {
                 assert_eq!(rgba.len(), (w * h * 4) as usize);
                 for r in 0..h {
                     let at = (((y + r) * 64 + x) * 4) as usize;
@@ -903,11 +1093,7 @@ mod tests {
         let mut m = Mosaic::new(p, 32);
         m.set_chunk((0, 0), Some(Chunk::from_fn(1, |_, _| None)));
         assert!(!m.painting());
-        let c = Chunk {
-            tops: vec![NO_TOP; 256],
-            states: vec![0; 256],
-            depth: 1,
-        };
+        let c = Chunk::new(vec![NO_TOP; 256], vec![0; 256], 1);
         m.set_chunk((0, 1), Some(c));
         paint_all(&mut m, &Ids);
         assert!(m.pixels().iter().all(|&b| b == 0));

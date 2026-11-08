@@ -3,11 +3,15 @@
 
 pub mod bake;
 pub mod layout;
+pub mod looks;
 pub mod mosaic;
+pub mod paint;
 pub mod pattern;
 pub mod projection;
+pub mod style;
 
 pub use mosaic::Mosaic;
+pub use paint::Painter;
 pub use projection::Projection;
 
 /// Default camera pitch in degrees (RULES.md section 1; MapStyle.java:62).
