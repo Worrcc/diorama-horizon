@@ -4,11 +4,13 @@ description = "Diorama minimap port, wasm32 Horizon client mod"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 diorama-core = { path = "../core" }
-# TODO(M1): add the horizon-mod-sdk dependency from the Horizon-iOS fork once the canvas
-# and client-world interfaces exist.
+# The Horizon-iOS fork's SDK at API level 17 (canvas + client-world), branch
+# claude/mod-canvas-api. Upstream Horizon has no WASM mods.
+horizon-mod-sdk = { path = "../../iaf-swarm/mod-canvas-api/crates/horizon-mod-sdk" }

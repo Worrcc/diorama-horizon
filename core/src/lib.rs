@@ -1,14 +1,18 @@
 //! Pure logic for the Diorama port: projection, baking, settings, waypoints.
 //! Numbers and formulas come from RULES.md. No Horizon dependencies.
 
+pub mod layout;
+pub mod pattern;
+pub mod projection;
+
+pub use projection::Projection;
+
 /// Default camera pitch in degrees (RULES.md section 1; MapStyle.java:62).
 pub const DEFAULT_PITCH_DEGREES: f64 = 50.0;
 
 /// Map row of a point: `v = z*sin(pitch) - y*cos(pitch)` (RULES.md section 1).
-/// Stub for M3; the map column is simply `x`.
 pub fn map_v(y: f64, z: f64, pitch_degrees: f64) -> f64 {
-    let r = pitch_degrees.to_radians();
-    z * r.sin() - y * r.cos()
+    Projection::new(pitch_degrees).v(y, z)
 }
 
 #[cfg(test)]

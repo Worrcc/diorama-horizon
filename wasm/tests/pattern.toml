@@ -1,0 +1,17 @@
+# M2 test pattern: a 48 x 48 box at the top right (10% of the test's 427 GUI px,
+# clamped to 48) holding the border, the checkerboard image and the arrow
+# (two triangles, outlined: 4 quads).
+
+[player]
+x = 3.5
+y = 70.0
+z = -12.5
+
+[[step]]
+frames = 1
+expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1, round = 0 }
+
+[[step]]
+player = { x = 40.0 }
+frames = 1
+expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1, round = 0 }
