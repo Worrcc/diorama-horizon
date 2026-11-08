@@ -1,0 +1,14 @@
+[package]
+name = "diorama"
+description = "Diorama minimap port, wasm32 Horizon client mod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+diorama-core = { path = "../core" }
+# TODO(M1): add the horizon-mod-sdk dependency from the Horizon-iOS fork once the canvas
+# and client-world interfaces exist.

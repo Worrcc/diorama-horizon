@@ -1,0 +1,28 @@
+**Unofficial** port of Diorama by Dara Adedeji (github.com/SunkenInTime/minecraft-orthogonal-map, Modrinth `diorama-map`) to Horizon. Not affiliated with or endorsed by the Diorama author or Mojang.
+
+Status: M0 scaffold. Nothing runs yet.
+
+## What's in and out
+
+TODO (PLAN-v2 section 1). See RULES.md for the numbers taken from Diorama and the dropped features.
+
+## Requirements
+
+TODO: the Horizon-iOS fork build with API level 17. It does not run in upstream Horizon nightlies.
+
+## Install
+
+TODO: desktop (fork build) and iOS.
+
+## Building
+
+TODO: `cargo test -p diorama-core`, `cargo build --target wasm32-unknown-unknown -p diorama`, packaging `diorama.hmod`.
+
+## Credits
+
+Diorama by Dara Adedeji (MIT). No Diorama assets are copied; all block colours are computed at run time from the
+player's loaded resource packs.
+
+## License
+
+MIT. See LICENSE (Diorama's notice kept, plus the port's).

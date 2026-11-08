@@ -1,0 +1,8 @@
+[package]
+name = "diorama-core"
+description = "Pure logic for the Diorama port to Horizon (no Horizon dependencies)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
