@@ -2,6 +2,7 @@
 //! Numbers and formulas come from RULES.md. No Horizon dependencies.
 
 pub mod bake;
+pub mod budget;
 pub mod cave;
 pub mod json;
 pub mod layout;

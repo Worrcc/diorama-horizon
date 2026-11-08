@@ -371,3 +371,38 @@ Code: `core/src/waypoints.rs`, `core/src/json.rs` (no dependencies), glue in `wa
   from the record's integers, or `execute in <dim> run tp @s ...` for another dimension; the dimension must be a
   lowercase resource id (`[a-z0-9_.-]:[a-z0-9_./-]`) or nothing runs. Horizon runs it as the player with the
   player's permissions (vanilla commands only), so it fails like a typed `/tp` without cheats.
+
+## 16. How the port stays in budget (M7)
+
+Code: `core/src/budget.rs` (the frame planner, step-cost rates, cost window), `core/src/mosaic.rs` (focus,
+interval dirty rows, per-column span and top-texel caches, in-place shift, row-wise outlines), the frame loop in
+`wasm/src/lib.rs`, timings in `bench/` (the mod in the fork's runtime on a made-up world, Cranelift or
+`--features pulley`) and the fork's `HORIZON_MOD_FRAME_TIMES=N` log (wall time of each mod's frame calls).
+
+- **Measured, not guessed.** The mod's own cost line comes from `work-left` (fuel) and stops at the budget;
+  only the host's wall clock shows overruns. M3's "max 300 µs" was that cap: the real worst frames were 1-6 ms
+  on Cranelift and 8-10 ms on Pulley. Pulley ran this code 30-80 times slower than Cranelift, not 5-20.
+- **Steps sized to what is left.** A chunk is read, prepared and put in as three steps; painting and uploading
+  are sized from learnt per-row and per-byte costs. A step starts only if its learnt cost fits above its reserve
+  (the box's work keeps 6%, the rest 35%, plus the learnt cost of drawing the box); the frame's first step always
+  runs. A step that runs the meter out doubles its guess (capped at four budgets).
+- **The box first** (plan risk 1, mitigation 3): its chunks, then its rows, then its texels, before the rest of
+  the mosaic. No visual cost.
+- **One texel a block on a slow engine** (mitigation 1, chosen at run time): once 16 chunks are in, if a chunk
+  set costs over 80 µs of the 300 µs budget (Pulley: 150-230 µs; compiled: 3-25 µs) the mosaic becomes 256 x 256
+  at 1 texel a block (the same 256 blocks). **Visual loss, Pulley/iOS only:** the map has half the resolution of
+  desktop's; at the default zoom (2 px a block) each texel is a 2 x 2 px block; a block's south face is 0.64
+  texel rows tall, so one-block steps show as a thin line or not at all and outlines are coarser. Desktop keeps
+  2 texels a block.
+- **Rejected:** a smaller mosaic alone (box 3.1 s on Pulley, and zoomed-out views lose their edges); a smaller
+  `columns` depth (4 or 8: no measurable gain, deep-water floors lost). A worker-thread mod call was not needed.
+- **Host time counted** (fork `5082b61b0`): `work-left` counts the time of `client-world.columns` and
+  `canvas.update-image` as the fuel it would have bought; without it the game's real chunk reads (unmetered)
+  pushed flying frames to 0.3-0.4 ms on Cranelift.
+- **Heap grown in `init`** (24 MiB in 64 KiB blocks): Pulley grows memory by copying it.
+- **Pulley while sprint-flying** (21.6 blocks/s): frames average 0.34-0.36 ms and the box's map lags behind
+  the player (`work/m7-pulley-after-fly.png`: the box still shows the land the player left). Walking, standing
+  and filling stay in budget.
+- **Not fixed:** the first frame after a join on Pulley (one 4-5 ms frame: the first recentre and image work)
+  and recentres while flying (0.6-2.7 ms frames every ~80 blocks, a 3.4 MB shift); a toroidal mosaic would
+  remove them.

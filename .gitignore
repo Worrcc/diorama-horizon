@@ -1,3 +1,5 @@
 target/
 work/
 dist/*.hmod
+bench/target/
+bench/target-pulley/

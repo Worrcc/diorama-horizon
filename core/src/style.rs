@@ -154,9 +154,28 @@ impl Style {
     /// Diorama's sky visibility rays (the column's sky light / 15). `top` for
     /// a top face, else a south face; `y` the hit height; `emission` 0..1.
     pub fn surface_light(&self, top: bool, y: f64, sky: f32, emission: f32) -> [f32; 3] {
+        self.surface_light_at(self.side_lambert(), top, y, sky, emission)
+    }
+
+    /// A south face's sunlight relative to a top face's (TileBaker.java:1223),
+    /// for [`Style::surface_light_at`]: worked out once, not per texel (the
+    /// sine and cosine are dear in WebAssembly, more so on Pulley).
+    pub fn side_lambert(&self) -> f64 {
         let (_, sy, sz) = self.sun();
-        // Relative to a top face (TileBaker.java:1223).
-        let lambert = if top { 1.0 } else { sz.max(0.0) / sy };
+        sz.max(0.0) / sy
+    }
+
+    /// [`Style::surface_light`] with the side face's [`Style::side_lambert`]
+    /// given.
+    pub fn surface_light_at(
+        &self,
+        side_lambert: f64,
+        top: bool,
+        y: f64,
+        sky: f32,
+        emission: f32,
+    ) -> [f32; 3] {
+        let lambert = if top { 1.0 } else { side_lambert };
         let direct = (f64::from(self.sun_strength) * lambert) as f32;
         let mut ambient = self.ambient;
         if self.sky_occlusion > 0.0 {

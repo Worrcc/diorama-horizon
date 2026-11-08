@@ -1,0 +1,23 @@
+[package]
+name = "diorama-bench"
+description = "Times the Diorama mod's frame calls in Horizon's mod runtime on a made-up world (M7)"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The Horizon-iOS fork's mod runtime, branch claude/mod-canvas-api, as for the SDK.
+horizon-mods = { path = "../../iaf-swarm/mod-canvas-api/crates/horizon-mods", features = ["runtime"] }
+log = { version = "0.4", features = ["std"] }
+# `--native`: the same bake run natively, to profile it.
+diorama-core = { path = "../core" }
+
+[features]
+# Runs the mod on Pulley, wasmtime's interpreter, as iOS does.
+pulley = ["horizon-mods/force-pulley"]
+
+[profile.release]
+debug = 1

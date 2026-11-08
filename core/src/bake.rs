@@ -184,7 +184,12 @@ pub fn spans(p: &Projection, z: i32, f: Faces) -> Spans {
 /// The texel rows whose centres fall in `[a, b)` of the map, for an image whose
 /// row 0 starts at map row `v0`: `first..end` (may be empty or out of the image).
 pub fn rows(a: f64, b: f64, v0: f64) -> (i64, i64) {
-    let t = f64::from(TEXELS_PER_BLOCK);
+    rows_at(a, b, v0, TEXELS_PER_BLOCK)
+}
+
+/// [`rows`] for `tpb` texels per block.
+pub fn rows_at(a: f64, b: f64, v0: f64, tpb: u32) -> (i64, i64) {
+    let t = f64::from(tpb);
     let first = ((a - v0) * t - 0.5).ceil() as i64;
     let end = ((b - v0) * t - 0.5).ceil() as i64;
     (first, end.max(first))
@@ -192,7 +197,12 @@ pub fn rows(a: f64, b: f64, v0: f64) -> (i64, i64) {
 
 /// The map row at the centre of texel row `j` of an image starting at `v0`.
 pub fn row_v(j: i64, v0: f64) -> f64 {
-    v0 + (j as f64 + 0.5) / f64::from(TEXELS_PER_BLOCK)
+    row_v_at(j, v0, TEXELS_PER_BLOCK)
+}
+
+/// [`row_v`] for `tpb` texels per block.
+pub fn row_v_at(j: i64, v0: f64, tpb: u32) -> f64 {
+    v0 + (j as f64 + 0.5) / f64::from(tpb)
 }
 
 /// The height where the ray through map row `v` meets the plane `z = zf`

@@ -24,12 +24,15 @@ pub const WATER_SIDE_PATH: f32 = 8.0;
 /// Shades faces with a set of looks and a style.
 pub struct Painter {
     pub looks: Looks,
+    /// Read it here; change it with [`Painter::set_style`].
     pub style: Style,
     pub tables: Tables,
     proj: Projection,
     /// The height of the cut when the map shows a cave slice, else none
     /// (the surface view). Faces fade with their depth under the cut.
     pub cave: Option<i32>,
+    /// `style.side_lambert()`, kept (it changes only with the style).
+    side_lambert: f64,
 }
 
 fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -44,7 +47,15 @@ impl Painter {
             style,
             tables: Tables::new(),
             cave: None,
+            side_lambert: style.side_lambert(),
         }
+    }
+
+    /// Changes the style (use this, not a write to `style`: the side light
+    /// is kept with it).
+    pub fn set_style(&mut self, style: Style) {
+        self.side_lambert = style.side_lambert();
+        self.style = style;
     }
 
     /// Lowers each column's top past plants, glass and air to the first block
@@ -110,9 +121,13 @@ impl Painter {
                 look.emission,
                 top,
             ),
-            None => self
-                .style
-                .surface_light(top, y, chunk.sky_at(col), look.emission),
+            None => self.style.surface_light_at(
+                self.side_lambert,
+                top,
+                y,
+                chunk.sky_at(col),
+                look.emission,
+            ),
         };
         let mut out = mul(a, light);
         let over = chunk.over_at(col);

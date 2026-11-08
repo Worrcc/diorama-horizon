@@ -15,7 +15,7 @@
 //! row's south faces), so a chunk that changes dirties its north neighbour's
 //! rows too.
 
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
 use crate::bake::{self, Chunk, Faces, Shade, Texel, TEXELS_PER_BLOCK};
 use crate::projection::Projection;
@@ -29,13 +29,99 @@ pub const EDGE: f64 = 96.0;
 /// The anchor's map row snaps to this many map units.
 const ROW_STEP: i32 = 8;
 
-/// A row interval `[first, end)` of one strip.
-type Rows = Option<(u32, u32)>;
+/// The row intervals `[first, end)` of one strip waiting for something,
+/// sorted and apart (painting the box's rows first can split one).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Dirty(Vec<(u32, u32)>);
+impl Dirty {
+    fn all(side: u32) -> Dirty {
+        Dirty(vec![(0, side)])
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn add(&mut self, (a, b): (u32, u32)) {
+        if a >= b {
+            return;
+        }
+        let (mut a, mut b) = (a, b);
+        self.0.retain(|&(x, y)| {
+            if y < a || x > b {
+                return true;
+            }
+            (a, b) = (a.min(x), b.max(y));
+            false
+        });
+        let at = self.0.partition_point(|&(x, _)| x < a);
+        self.0.insert(at, (a, b));
+    }
+    fn remove(&mut self, (a, b): (u32, u32)) {
+        let mut out = Vec::with_capacity(self.0.len() + 1);
+        for &(x, y) in &self.0 {
+            if y <= a || x >= b {
+                out.push((x, y));
+                continue;
+            }
+            if x < a {
+                out.push((x, a));
+            }
+            if y > b {
+                out.push((b, y));
+            }
+        }
+        self.0 = out;
+    }
+    fn hull(&self) -> Option<(u32, u32)> {
+        Some((self.0.first()?.0, self.0.last()?.1))
+    }
+    /// The first interval, clipped to rows `[y0, y1)` when given.
+    fn first_in(&self, rows: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        match rows {
+            None => self.0.first().copied(),
+            Some((y0, y1)) => (self.0.iter())
+                .map(|&(x, y)| (x.max(y0), y.min(y1)))
+                .find(|(x, y)| x < y),
+        }
+    }
+}
 
 struct Cached {
     chunk: Chunk,
     /// The map rows `[a, b)` its faces cover now (none: it draws nothing).
     span: Option<(f64, f64)>,
+    /// The same for each row z of its columns: a repaint skips the rows
+    /// that miss its rows, and a new chunk south of it redoes only its last
+    /// (M7).
+    rows: [Option<(f64, f64)>; 16],
+    /// Each column's top face texel, shaded the first time it is painted:
+    /// a top face spans rows that small paint steps reach one at a time
+    /// (M7). [`Mosaic::repaint_all`] forgets them (the looks changed).
+    tops: Vec<Cell<Texel>>,
+    /// Each column's map rows, so a repaint skips the columns that miss its
+    /// rows without working their faces out.
+    cols: Vec<(f64, f64)>,
+}
+
+/// A column that draws nothing.
+const NO_SPAN: (f64, f64) = (f64::INFINITY, f64::NEG_INFINITY);
+
+/// A top face not shaded yet.
+const UNSHADED: Texel = Texel {
+    rgb: u32::MAX,
+    seen: 0.0,
+    water: 0.0,
+};
+
+fn no_tops() -> Vec<Cell<Texel>> {
+    vec![Cell::new(UNSHADED); 256]
+}
+
+fn join(a: Option<(f64, f64)>, b: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// What the baker did, for the mod's cost log and the tests.
@@ -51,6 +137,9 @@ pub struct Stats {
 pub struct Mosaic {
     proj: Projection,
     side: u32,
+    /// Texels per block across ([`TEXELS_PER_BLOCK`] unless made with
+    /// [`Mosaic::with_texels`]).
+    tpb: u32,
     /// Block x of texel column 0 (a multiple of 16) and map row of texel row 0
     /// (a multiple of [`ROW_STEP`]).
     u0: i32,
@@ -64,22 +153,39 @@ pub struct Mosaic {
     seen: Vec<f32>,
     wet: Vec<u8>,
     chunks: BTreeMap<(i32, i32), Cached>,
-    paint: Vec<Rows>,
-    upload: Vec<Rows>,
+    paint: Vec<Dirty>,
+    upload: Vec<Dirty>,
+    /// Texels `(x0, y0, x1, y1)` painted and uploaded before the rest: the
+    /// box's window (M7, PLAN-v2 risk 1 "bake the visible map first").
+    focus: Option<(u32, u32, u32, u32)>,
     pub stats: Stats,
     /// How much nearer a neighbour must be to draw an outline: [`OUTLINE_DEPTH`],
     /// or [`crate::style::CAVE_OUTLINE_DEPTH`] in a cave slice (TileBaker.java:891).
     pub outline_depth: f32,
 }
 
-fn hull(slot: &mut Rows, (a, b): (u32, u32)) {
-    if a >= b {
-        return;
+/// Moves a `side` x `side` image of `stride` values per texel so texel
+/// `(i, j)` takes what was at `(i + di, j + dj)`, and fills what came from
+/// outside with `fill`. `|di|` and `|dj|` are under `side`.
+fn shift_buf<T: Copy>(buf: &mut [T], side: i64, di: i64, dj: i64, stride: usize, fill: T) {
+    let n = buf.len() as i64;
+    let off = (dj * side + di) * stride as i64;
+    if off > 0 {
+        buf.copy_within(off as usize.., 0);
+    } else if off < 0 {
+        buf.copy_within(..(n + off) as usize, (-off) as usize);
     }
-    *slot = Some(match *slot {
-        Some((x, y)) => (x.min(a), y.max(b)),
-        None => (a, b),
-    });
+    let row = side as usize * stride;
+    for j in 0..side {
+        let r = &mut buf[j as usize * row..(j as usize + 1) * row];
+        if !(0..side).contains(&(j + dj)) {
+            r.fill(fill);
+        } else if di > 0 {
+            r[(side - di) as usize * stride..].fill(fill);
+        } else if di < 0 {
+            r[..(-di) as usize * stride].fill(fill);
+        }
+    }
 }
 
 fn floor_to(a: f64, step: i32) -> i32 {
@@ -90,6 +196,7 @@ fn floor_to(a: f64, step: i32) -> i32 {
 struct Canvas<'a> {
     proj: &'a Projection,
     side: u32,
+    tpb: u32,
     v0: f64,
     rgba: &'a mut [u8],
     height: &'a mut [f32],
@@ -119,7 +226,7 @@ impl Canvas<'_> {
         }
     }
 
-    /// Paints one column's faces into its two texel columns from `i`, rows
+    /// Paints one column's faces into its texel columns from `i`, rows
     /// `r0..r1` only. `z` is the column's world z.
     #[allow(clippy::too_many_arguments)]
     fn column(
@@ -128,7 +235,7 @@ impl Canvas<'_> {
         z: i32,
         f: Faces,
         chunk: &Chunk,
-        col: usize,
+        (col, top): (usize, &Cell<Texel>),
         shade: &impl Shade,
         (r0, r1): (u32, u32),
     ) {
@@ -136,45 +243,45 @@ impl Canvas<'_> {
         let s = bake::spans(self.proj, z, f);
         let (lo, hi) = (i64::from(r0), i64::from(r1));
         let clip = |(a, b): (i64, i64)| (a.clamp(lo, hi) as u32, b.clamp(lo, hi) as u32);
-        let (a, b) = clip(bake::rows(s.top.0, s.top.1, self.v0));
+        let (a, b) = clip(bake::rows_at(s.top.0, s.top.1, self.v0, self.tpb));
         if a < b {
             let y = (f.top + 1) as f32;
-            let t = shade.top(chunk, col, f64::from(y));
+            let mut t = top.get();
+            if t.rgb == u32::MAX {
+                t = shade.top(chunk, col, f64::from(y));
+                top.set(t);
+            }
             for j in a..b {
-                self.put(i, j, y, t);
-                self.put(i + 1, j, y, t);
+                for k in 0..self.tpb {
+                    self.put(i + k, j, y, t);
+                }
             }
         }
         if f.south_blocks() == 0 {
             return;
         }
-        let (a, b) = clip(bake::rows(s.south.0, s.south.1, self.v0));
+        let (a, b) = clip(bake::rows_at(s.south.0, s.south.1, self.v0, self.tpb));
         let zf = f64::from(z + 1);
         for j in a..b {
-            let v = bake::row_v(i64::from(j), self.v0);
+            let v = bake::row_v_at(i64::from(j), self.v0, self.tpb);
             let y = bake::y_on_south(self.proj, v, zf);
             let block = (y.floor() as i32).clamp(f.south_from, f.top);
             let t = shade.south(chunk, col, block, y);
-            self.put(i, j, y as f32, t);
-            self.put(i + 1, j, y as f32, t);
+            for k in 0..self.tpb {
+                self.put(i + k, j, y as f32, t);
+            }
         }
     }
 }
 
-/// The faces of local column `(x, z)` of chunk `key`, its south neighbour
-/// read from the chunk or the cache.
-fn column_faces(
-    chunks: &BTreeMap<(i32, i32), Cached>,
-    key: (i32, i32),
-    chunk: &Chunk,
-    x: usize,
-    z: usize,
-) -> Option<Faces> {
+/// The faces of local column `(x, z)` of a chunk, with `south` the chunk
+/// south of it if cached (it holds the last row's south neighbours).
+fn column_faces(chunk: &Chunk, south: Option<&Chunk>, x: usize, z: usize) -> Option<Faces> {
     let top = chunk.top(x, z)?;
     let south = if z < 15 {
         Some(chunk.top(x, z + 1))
     } else {
-        chunks.get(&(key.0, key.1 + 1)).map(|c| c.chunk.top(x, 0))
+        south.map(|c| c.top(x, 0))
     };
     Some(bake::faces(top, south))
 }
@@ -182,12 +289,21 @@ fn column_faces(
 impl Mosaic {
     /// An empty mosaic anchored at map (0, 0).
     pub fn new(proj: Projection, side: u32) -> Mosaic {
-        assert!(side > 0 && side.is_multiple_of(STRIP), "side {side}");
+        Mosaic::with_texels(proj, side, TEXELS_PER_BLOCK)
+    }
+    /// An empty mosaic of `tpb` texels per block across.
+    pub fn with_texels(proj: Projection, side: u32, tpb: u32) -> Mosaic {
+        let strip = 16 * tpb;
+        assert!(
+            tpb > 0 && side > 0 && side.is_multiple_of(strip),
+            "side {side}"
+        );
         let n = (side * side) as usize;
-        let strips = (side / STRIP) as usize;
+        let strips = (side / strip) as usize;
         Mosaic {
             proj,
             side,
+            tpb,
             u0: 0,
             v0: 0,
             rgba: vec![0; n * 4],
@@ -195,14 +311,34 @@ impl Mosaic {
             seen: vec![0.0; n],
             wet: vec![0; n],
             chunks: BTreeMap::new(),
-            paint: vec![None; strips],
-            upload: vec![None; strips],
+            paint: vec![Dirty::default(); strips],
+            upload: vec![Dirty::default(); strips],
+            focus: None,
             stats: Stats::default(),
             outline_depth: OUTLINE_DEPTH,
         }
     }
     pub fn side(&self) -> u32 {
         self.side
+    }
+    /// Texels per block across.
+    pub fn texels_per_block(&self) -> u32 {
+        self.tpb
+    }
+    /// Texel columns per strip (one chunk across).
+    pub fn strip(&self) -> u32 {
+        16 * self.tpb
+    }
+    /// The same chunks in a new image of `side` texels and `tpb` texels per
+    /// block, all to paint and upload again (the chunks' spans are in map
+    /// units, so they stay).
+    pub fn resized(mut self, side: u32, tpb: u32) -> Mosaic {
+        let mut m = Mosaic::with_texels(self.proj, side, tpb);
+        m.chunks = std::mem::take(&mut self.chunks);
+        m.outline_depth = self.outline_depth;
+        m.stats = self.stats;
+        m.repaint_all();
+        m
     }
     pub fn projection(&self) -> &Projection {
         &self.proj
@@ -213,7 +349,7 @@ impl Mosaic {
     }
     /// The (fractional) texel of map point `(u, v)`.
     pub fn texel_of(&self, u: f64, v: f64) -> (f64, f64) {
-        let t = f64::from(TEXELS_PER_BLOCK);
+        let t = f64::from(self.tpb);
         ((u - f64::from(self.u0)) * t, (v - f64::from(self.v0)) * t)
     }
     /// The image, RGBA rows top first.
@@ -240,55 +376,90 @@ impl Mosaic {
     }
     /// Marks the whole image to paint again (the looks changed).
     pub fn repaint_all(&mut self) {
-        self.paint.fill(Some((0, self.side)));
+        self.paint.fill(Dirty::all(self.side));
+        self.forget_shades();
+    }
+    /// Forgets the top faces' shades kept (the painter changed: its looks,
+    /// style or cave cut), so what is painted from now on is shaded anew.
+    pub fn forget_shades(&mut self) {
+        for c in self.chunks.values_mut() {
+            c.tops = no_tops();
+        }
+    }
+    /// Paints and uploads texels `(x0, y0, x1, y1)` before the others (none:
+    /// nearest strip first, top down).
+    pub fn set_focus(&mut self, focus: Option<(u32, u32, u32, u32)>) {
+        self.focus = focus;
     }
     pub fn has(&self, key: (i32, i32)) -> bool {
         self.chunks.contains_key(&key)
     }
     /// Strips with rows left to paint, and to upload.
     pub fn painting(&self) -> bool {
-        self.paint.iter().any(Option::is_some)
+        self.paint.iter().any(|d| !d.is_empty())
     }
     pub fn uploading(&self) -> bool {
-        self.upload.iter().any(Option::is_some)
+        self.upload.iter().any(|d| !d.is_empty())
     }
-    /// The rows of strip `s` waiting to be painted.
+    /// The first and last row of strip `s` waiting to be painted.
     pub fn paint_rows(&self, s: u32) -> Option<(u32, u32)> {
-        self.paint[s as usize]
+        self.paint[s as usize].hull()
+    }
+    /// No texel of the window `[x0, x1) x [y0, y1)` waits to be painted or
+    /// uploaded (the fill-in clock of M7).
+    pub fn window_done(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+        let strips = (x0 / self.strip())..x1.div_ceil(self.strip()).min(self.side / self.strip());
+        strips.into_iter().all(|s| {
+            [&self.paint[s as usize], &self.upload[s as usize]]
+                .iter()
+                .all(|d| d.first_in(Some((y0, y1))).is_none())
+        })
     }
     /// The strip holding chunk x `cx`, if it is in the image.
     pub fn strip_of(&self, cx: i32) -> Option<u32> {
         let d = i64::from(cx) * 16 - i64::from(self.u0);
         let s = d.div_euclid(16);
-        (0..i64::from(self.side / STRIP))
+        (0..i64::from(self.side / self.strip()))
             .contains(&s)
             .then_some(s as u32)
     }
 
-    /// The map rows chunk `key` draws now, from the cache.
-    fn span_of(&self, key: (i32, i32)) -> Option<(f64, f64)> {
-        let c = self.chunks.get(&key)?;
-        let mut span: Option<(f64, f64)> = None;
-        for z in 0..16 {
+    /// The map rows chunk `key`'s columns of rows `zs` draw now, from the
+    /// cache, a row z at a time.
+    /// Each column's span goes in `cols` (`NO_SPAN` for none).
+    fn row_spans(
+        &self,
+        key: (i32, i32),
+        zs: std::ops::Range<usize>,
+        cols: &mut [(f64, f64)],
+    ) -> [Option<(f64, f64)>; 16] {
+        let mut out = [None; 16];
+        let Some(c) = self.chunks.get(&key) else {
+            return out;
+        };
+        let south = self.chunks.get(&(key.0, key.1 + 1)).map(|s| &s.chunk);
+        for z in zs {
             for x in 0..16 {
-                let Some(f) = column_faces(&self.chunks, key, &c.chunk, x, z) else {
+                cols[z * 16 + x] = NO_SPAN;
+                let Some(f) = column_faces(&c.chunk, south, x, z) else {
                     continue;
                 };
                 let s = bake::spans(&self.proj, key.1 * 16 + z as i32, f);
-                let (a, b) = (s.top.0, s.top.1.max(s.south.1));
-                span = Some(span.map_or((a, b), |(x, y)| (x.min(a), y.max(b))));
+                let span = (s.top.0, s.top.1.max(s.south.1));
+                cols[z * 16 + x] = span;
+                out[z] = join(out[z], Some(span));
             }
         }
-        span
+        out
     }
 
     /// Marks the rows of map span `(a, b)` in chunk x `cx`'s strip for painting.
     fn mark(&mut self, cx: i32, (a, b): (f64, f64)) {
         let Some(s) = self.strip_of(cx) else { return };
-        let (first, end) = bake::rows(a, b, f64::from(self.v0));
+        let (first, end) = bake::rows_at(a, b, f64::from(self.v0), self.tpb);
         let side = i64::from(self.side);
         let (first, end) = (first.clamp(0, side) as u32, end.clamp(0, side) as u32);
-        hull(&mut self.paint[s as usize], (first, end));
+        self.paint[s as usize].add((first, end));
     }
 
     /// Puts a chunk's columns in the cache (none: it unloaded) and marks what
@@ -299,20 +470,37 @@ impl Mosaic {
         let old_n = self.chunks.get(&north).and_then(|c| c.span);
         match chunk {
             Some(chunk) => {
-                self.chunks.insert(key, Cached { chunk, span: None });
+                self.chunks.insert(
+                    key,
+                    Cached {
+                        chunk,
+                        span: None,
+                        rows: [None; 16],
+                        tops: no_tops(),
+                        cols: Vec::new(),
+                    },
+                );
             }
             None => {
                 self.chunks.remove(&key);
             }
         }
-        let new_c = self.span_of(key);
-        if let Some(c) = self.chunks.get_mut(&key) {
-            c.span = new_c;
+        let mut new_c = None;
+        if self.chunks.contains_key(&key) {
+            let mut cols = vec![NO_SPAN; 256];
+            let rows = self.row_spans(key, 0..16, &mut cols);
+            new_c = rows.iter().copied().fold(None, join);
+            let c = self.chunks.get_mut(&key).expect("just put");
+            (c.span, c.rows, c.cols) = (new_c, rows, cols);
         }
-        let new_n = self.span_of(north);
-        if let Some(n) = self.chunks.get_mut(&north) {
-            n.span = new_n;
-        }
+        let mut last = [NO_SPAN; 256];
+        let edge = self.row_spans(north, 15..16, &mut last)[15];
+        let new_n = self.chunks.get_mut(&north).and_then(|n| {
+            n.rows[15] = edge;
+            n.cols[240..].copy_from_slice(&last[240..]);
+            n.span = n.rows.iter().copied().fold(None, join);
+            n.span
+        });
         for s in [old_c, new_c, old_n, new_n].into_iter().flatten() {
             self.mark(key.0, s);
         }
@@ -325,6 +513,12 @@ impl Mosaic {
             .retain(|&(x, z), _| (x - centre.0).abs() <= radius && (z - centre.1).abs() <= radius);
     }
 
+    /// Drops chunk `key` from the cache (it stays in the image until
+    /// something repaints its rows).
+    pub fn forget(&mut self, key: (i32, i32)) {
+        self.chunks.remove(&key);
+    }
+
     /// Forgets every chunk and clears the image (a new world or dimension).
     pub fn clear(&mut self) {
         self.chunks.clear();
@@ -332,36 +526,79 @@ impl Mosaic {
         self.height.fill(f32::NEG_INFINITY);
         self.seen.fill(0.0);
         self.wet.fill(0);
-        self.paint.fill(None);
-        self.upload.fill(Some((0, self.side)));
+        self.paint.fill(Dirty::default());
+        self.upload.fill(Dirty::all(self.side));
     }
 
-    /// Paints up to `max_rows` dirty rows of the dirty strip nearest map
-    /// column `near_u`. False when nothing is left to paint.
+    /// Rows of the focus wait to be painted, or to be uploaded.
+    pub fn focus_painting(&self) -> bool {
+        self.focus_rows().is_some_and(|((s, e), rows)| {
+            self.paint[s..e]
+                .iter()
+                .any(|d| d.first_in(Some(rows)).is_some())
+        })
+    }
+    pub fn focus_uploading(&self) -> bool {
+        self.focus_rows().is_some_and(|((s, e), rows)| {
+            self.upload[s..e]
+                .iter()
+                .any(|d| d.first_in(Some(rows)).is_some())
+        })
+    }
+    /// [`Mosaic::take_upload`] of the focus's texels only.
+    pub fn take_focus_upload(
+        &mut self,
+        max_bytes: usize,
+        outline: f32,
+        mut put: impl FnMut(u32, u32, u32, u32, &[u8]),
+    ) -> usize {
+        match self.focus_rows() {
+            Some(focus) => self.upload_pass(Some(focus), max_bytes, outline, &mut put),
+            None => 0,
+        }
+    }
+
+    /// The strips and rows of the focus, if any.
+    fn focus_rows(&self) -> Option<((usize, usize), (u32, u32))> {
+        let (x0, y0, x1, y1) = self.focus?;
+        let strips = self.paint.len();
+        let s = ((x0 / self.strip()) as usize).min(strips);
+        let e = (x1.div_ceil(self.strip()) as usize).min(strips);
+        (s < e && y0 < y1).then_some(((s, e), (y0, y1)))
+    }
+
+    /// Paints up to `max_rows` dirty rows: the focus's first, of its strip
+    /// nearest map column `near_u`, else the dirty strip nearest it, top
+    /// down. False when nothing is left to paint.
     pub fn paint_step(&mut self, shade: &impl Shade, near_u: f64, max_rows: u32) -> bool {
-        let near = (near_u - f64::from(self.u0)) * f64::from(TEXELS_PER_BLOCK);
-        let pick = (0..self.paint.len())
-            .filter(|&s| self.paint[s].is_some())
-            .min_by(|&a, &b| {
-                let d =
-                    |s: usize| (s as f64 * f64::from(STRIP) + f64::from(STRIP) / 2.0 - near).abs();
-                d(a).total_cmp(&d(b))
-            });
-        let Some(s) = pick else { return false };
-        let (r0, r1) = self.paint[s].expect("picked a dirty strip");
+        let near = (near_u - f64::from(self.u0)) * f64::from(self.tpb);
+        let d = |s: usize| {
+            (s as f64 * f64::from(self.strip()) + f64::from(self.strip()) / 2.0 - near).abs()
+        };
+        let pick = |strips: (usize, usize), rows: Option<(u32, u32)>| {
+            (strips.0..strips.1)
+                .filter_map(|s| Some((s, self.paint[s].first_in(rows)?)))
+                .min_by(|a, b| d(a.0).total_cmp(&d(b.0)))
+        };
+        let focus = self
+            .focus_rows()
+            .and_then(|(strips, rows)| pick(strips, Some(rows)));
+        let Some((s, (r0, r1))) = focus.or_else(|| pick((0, self.paint.len()), None)) else {
+            return false;
+        };
         let end = r1.min(r0 + max_rows.max(1));
-        self.paint[s] = (end < r1).then_some((end, r1));
+        self.paint[s].remove((r0, end));
         self.repaint(s as u32, (r0, end), shade);
         // Outlines read the texels around: the rows next to these and the
         // strips beside go up again too.
         let rows = (r0.saturating_sub(1), (end + 1).min(self.side));
-        hull(&mut self.upload[s], rows);
+        self.upload[s].add(rows);
         if shade.outline() > 0.0 {
             if s > 0 {
-                hull(&mut self.upload[s - 1], rows);
+                self.upload[s - 1].add(rows);
             }
             if s + 1 < self.upload.len() {
-                hull(&mut self.upload[s + 1], rows);
+                self.upload[s + 1].add(rows);
             }
         }
         self.stats.jobs += 1;
@@ -371,18 +608,20 @@ impl Mosaic {
     /// Clears rows `r0..r1` of strip `s` and paints them again from the cache.
     fn repaint(&mut self, s: u32, (r0, r1): (u32, u32), shade: &impl Shade) {
         let side = self.side;
-        let i0 = s * STRIP;
+        let i0 = s * self.strip();
         for j in r0..r1 {
             let at = (j * side + i0) as usize;
-            self.height[at..at + STRIP as usize].fill(f32::NEG_INFINITY);
-            self.rgba[at * 4..(at + STRIP as usize) * 4].fill(0);
+            let w = self.strip() as usize;
+            self.height[at..at + w].fill(f32::NEG_INFINITY);
+            self.rgba[at * 4..(at + w) * 4].fill(0);
         }
         let cx = (self.u0 + s as i32 * 16).div_euclid(16);
-        let t = f64::from(TEXELS_PER_BLOCK);
+        let t = f64::from(self.tpb);
         let (va, vb) = (
             f64::from(self.v0) + f64::from(r0) / t,
             f64::from(self.v0) + f64::from(r1) / t,
         );
+        let tpb = self.tpb;
         let Mosaic {
             proj,
             v0,
@@ -397,6 +636,7 @@ impl Mosaic {
         let mut canvas = Canvas {
             proj,
             side,
+            tpb,
             v0: f64::from(*v0),
             rgba,
             height,
@@ -409,17 +649,26 @@ impl Mosaic {
                 Some((a, b)) if a < vb && b > va => {}
                 _ => continue,
             }
+            let south = chunks.get(&(key.0, key.1 + 1)).map(|s| &s.chunk);
             for z in 0..16 {
+                match c.rows[z] {
+                    Some((a, b)) if a < vb && b > va => {}
+                    _ => continue,
+                }
                 for x in 0..16 {
-                    let Some(f) = column_faces(chunks, key, &c.chunk, x, z) else {
+                    let (a, b) = c.cols[z * 16 + x];
+                    if a >= vb || b <= va {
+                        continue;
+                    }
+                    let Some(f) = column_faces(&c.chunk, south, x, z) else {
                         continue;
                     };
                     canvas.column(
-                        i0 + x as u32 * TEXELS_PER_BLOCK,
+                        i0 + x as u32 * self.tpb,
                         key.1 * 16 + z as i32,
                         f,
                         &c.chunk,
-                        z * 16 + x,
+                        (z * 16 + x, &c.tops[z * 16 + x]),
                         shade,
                         (r0, r1),
                     );
@@ -439,7 +688,7 @@ impl Mosaic {
             return false;
         }
         // Half the image in blocks along u and in map units along v.
-        let half = (self.side / TEXELS_PER_BLOCK / 2) as i32;
+        let half = (self.side / self.tpb / 2) as i32;
         let u0 = floor_to(u, 16) - floor_to(f64::from(half), 16);
         let v0 = floor_to(v, ROW_STEP) - floor_to(f64::from(half), ROW_STEP);
         self.shift(u0 - self.u0, v0 - self.v0);
@@ -452,45 +701,27 @@ impl Mosaic {
     pub fn shift(&mut self, du: i32, dv: i32) {
         assert!(du.rem_euclid(16) == 0, "du {du}");
         self.stats.recentres += 1;
-        let t = TEXELS_PER_BLOCK as i64;
+        let t = self.tpb as i64;
         let side = i64::from(self.side);
         let (di, dj) = (i64::from(du) * t, i64::from(dv) * t);
         self.u0 += du;
         self.v0 += dv;
-        self.upload.fill(Some((0, self.side)));
+        self.upload.fill(Dirty::all(self.side));
         if di.abs() >= side || dj.abs() >= side {
             self.rgba.fill(0);
             self.height.fill(f32::NEG_INFINITY);
-            self.paint.fill(Some((0, self.side)));
+            self.paint.fill(Dirty::all(self.side));
             return;
         }
-        let n = (self.side * self.side) as usize;
-        let mut rgba = vec![0u8; n * 4];
-        let mut height = vec![f32::NEG_INFINITY; n];
-        let mut seen = vec![0.0f32; n];
-        let mut wet = vec![0u8; n];
-        let (i_from, i_to) = ((-di).max(0), (side - di).min(side));
-        for j in 0..side {
-            let sj = j + dj;
-            if !(0..side).contains(&sj) || i_from >= i_to {
-                continue;
-            }
-            let dst = (j * side + i_from) as usize;
-            let src = (sj * side + i_from + di) as usize;
-            let w = (i_to - i_from) as usize;
-            height[dst..dst + w].copy_from_slice(&self.height[src..src + w]);
-            seen[dst..dst + w].copy_from_slice(&self.seen[src..src + w]);
-            wet[dst..dst + w].copy_from_slice(&self.wet[src..src + w]);
-            rgba[dst * 4..(dst + w) * 4].copy_from_slice(&self.rgba[src * 4..(src + w) * 4]);
-        }
-        self.rgba = rgba;
-        self.height = height;
-        self.seen = seen;
-        self.wet = wet;
+        // In place: no new buffers (3.4 MB a recentre is dear in a mod).
+        shift_buf(&mut self.rgba, side, di, dj, 4, 0);
+        shift_buf(&mut self.height, side, di, dj, 1, f32::NEG_INFINITY);
+        shift_buf(&mut self.seen, side, di, dj, 1, 0.0);
+        shift_buf(&mut self.wet, side, di, dj, 1, 0);
 
         let strips = self.paint.len() as i64;
         let ds = i64::from(du / 16);
-        let old = std::mem::replace(&mut self.paint, vec![None; strips as usize]);
+        let old = std::mem::replace(&mut self.paint, vec![Dirty::default(); strips as usize]);
         let band = if dj > 0 {
             ((side - dj) as u32, self.side)
         } else {
@@ -500,51 +731,49 @@ impl Mosaic {
             let slot = &mut self.paint[s as usize];
             let from = s + ds;
             if !(0..strips).contains(&from) {
-                *slot = Some((0, self.side));
+                *slot = Dirty::all(self.side);
                 continue;
             }
-            if let Some((a, b)) = old[from as usize] {
-                let (a, b) = (
+            for &(a, b) in &old[from as usize].0 {
+                slot.add((
                     (i64::from(a) - dj).clamp(0, side) as u32,
                     (i64::from(b) - dj).clamp(0, side) as u32,
-                );
-                hull(slot, (a, b));
+                ));
             }
-            hull(slot, band);
+            slot.add(band);
         }
     }
 
-    /// Texel `(i, j)`'s depth along the view, as Diorama measures it
-    /// (TileBaker.java:1088, `-(sin*y + cos*z)` at the hit): with the hit on
-    /// map row `v` at height `y`, `-(y/sin + v*cot)`. Nearer is smaller.
-    fn depth(&self, at: usize, v: f64) -> f32 {
+    /// How much higher a neighbour's seen height must be than a texel's for
+    /// an outline: beside it, in the row above, in the row below. A texel's
+    /// depth along the view, as Diorama measures it (TileBaker.java:1088,
+    /// `-(sin*y + cos*z)` at the hit), is `-(y/sin + v*cot)` for a hit on map
+    /// row `v` at height `y`, so "more than [`Mosaic::outline_depth`] nearer"
+    /// is a difference of seen heights, less the rows' `cos/t` between them:
+    /// worked out once, not per texel.
+    fn outline_limits(&self) -> [f32; 3] {
         let p = &self.proj;
-        (-(f64::from(self.seen[at]) / p.sin + v * p.cos / p.sin)) as f32
+        let same = f64::from(self.outline_depth) * p.sin;
+        let step = p.cos / f64::from(self.tpb);
+        [same as f32, (same + step) as f32, (same - step) as f32]
     }
 
-    /// Texel `(i, j)` as uploaded: its colour darkened by `outline` where a
-    /// neighbour (left, right, up, down) is more than [`OUTLINE_DEPTH`] nearer,
-    /// faded by the water in front (TileBaker.java:822-840). 0 when nothing
-    /// is painted there.
-    pub fn shown_at(&self, i: u32, j: u32, outline: f32) -> [u8; 4] {
-        let side = self.side;
-        let at = (j * side + i) as usize;
+    /// Texel `(i, j)` (at index `at`) as uploaded, with `limits` from
+    /// [`Mosaic::outline_limits`].
+    fn shown(&self, i: u32, j: u32, outline: f32, [same, up, down]: [f32; 3]) -> [u8; 4] {
+        let side = self.side as usize;
+        let at = j as usize * side + i as usize;
         let mut px = [0u8; 4];
         px.copy_from_slice(&self.rgba[at * 4..at * 4 + 4]);
         if px[3] == 0 || outline <= 0.0 {
             return px;
         }
-        let t = f64::from(TEXELS_PER_BLOCK);
-        let v = |j: u32| f64::from(self.v0) + (f64::from(j) + 0.5) / t;
-        let here = self.depth(at, v(j));
-        let nearer = |ni: u32, nj: u32| {
-            let n = (nj * side + ni) as usize;
-            self.rgba[n * 4 + 3] != 0 && here - self.depth(n, v(nj)) > self.outline_depth
-        };
-        let edge = (i > 0 && nearer(i - 1, j))
-            || (i + 1 < side && nearer(i + 1, j))
-            || (j > 0 && nearer(i, j - 1))
-            || (j + 1 < side && nearer(i, j + 1));
+        let s = self.seen[at];
+        let nearer = |n: usize, limit: f32| self.rgba[n * 4 + 3] != 0 && self.seen[n] - s > limit;
+        let edge = (i > 0 && nearer(at - 1, same))
+            || ((i as usize) + 1 < side && nearer(at + 1, same))
+            || (j > 0 && nearer(at - side, up))
+            || ((j as usize) + 1 < side && nearer(at + side, down));
         if edge {
             let keep = outline_keep(outline, f32::from(self.wet[at]) / WET_SCALE);
             let rgb = (u32::from(px[0]) << 16) | (u32::from(px[1]) << 8) | u32::from(px[2]);
@@ -552,6 +781,49 @@ impl Mosaic {
             px[..3].copy_from_slice(&[(d >> 16) as u8, (d >> 8) as u8, d as u8]);
         }
         px
+    }
+
+    /// Darkens the outlined texels of row `j` from column `x` in `out` (the
+    /// row's texels as painted), as [`Mosaic::shown`] does texel by texel.
+    fn outline_row(
+        &self,
+        j: u32,
+        x: u32,
+        outline: f32,
+        [same, up, down]: [f32; 3],
+        out: &mut [u8],
+    ) {
+        let side = self.side as usize;
+        let row = j as usize * side;
+        let (has_up, has_down) = (j > 0, (j as usize) + 1 < side);
+        for (k, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if px[3] == 0 {
+                continue;
+            }
+            let i = x as usize + k;
+            let at = row + i;
+            let s = self.seen[at];
+            let nearer =
+                |n: usize, limit: f32| self.rgba[n * 4 + 3] != 0 && self.seen[n] - s > limit;
+            let edge = (i > 0 && nearer(at - 1, same))
+                || (i + 1 < side && nearer(at + 1, same))
+                || (has_up && nearer(at - side, up))
+                || (has_down && nearer(at + side, down));
+            if edge {
+                let keep = outline_keep(outline, f32::from(self.wet[at]) / WET_SCALE);
+                let rgb = (u32::from(px[0]) << 16) | (u32::from(px[1]) << 8) | u32::from(px[2]);
+                let d = darken(rgb, keep);
+                px[..3].copy_from_slice(&[(d >> 16) as u8, (d >> 8) as u8, d as u8]);
+            }
+        }
+    }
+
+    /// Texel `(i, j)` as uploaded: its colour darkened by `outline` where a
+    /// neighbour (left, right, up, down) is more than [`OUTLINE_DEPTH`] nearer,
+    /// faded by the water in front (TileBaker.java:822-840). 0 when nothing
+    /// is painted there.
+    pub fn shown_at(&self, i: u32, j: u32, outline: f32) -> [u8; 4] {
+        self.shown(i, j, outline, self.outline_limits())
     }
 
     /// Hands the dirty rects to `put(x, y, width, height, rgba)`, at most
@@ -566,41 +838,65 @@ impl Mosaic {
         mut put: impl FnMut(u32, u32, u32, u32, &[u8]),
     ) -> usize {
         let mut given = 0;
-        let mut s = 0;
-        let strips = self.upload.len();
+        if let Some(focus) = self.focus_rows() {
+            given = self.upload_pass(Some(focus), max_bytes, outline, &mut put);
+        }
+        if given < max_bytes {
+            given += self.upload_pass(None, max_bytes - given, outline, &mut put);
+        }
+        given
+    }
+
+    /// [`Mosaic::take_upload`] over some strips and rows, or all.
+    fn upload_pass(
+        &mut self,
+        window: Option<((usize, usize), (u32, u32))>,
+        max_bytes: usize,
+        outline: f32,
+        put: &mut impl FnMut(u32, u32, u32, u32, &[u8]),
+    ) -> usize {
+        let ((mut s, strips), rows) = match window {
+            Some((strips, rows)) => (strips, Some(rows)),
+            None => ((0, self.upload.len()), None),
+        };
+        let mut given = 0;
         let mut buf = Vec::new();
         while s < strips {
-            let Some((r0, r1)) = self.upload[s] else {
+            let Some((r0, r1)) = self.upload[s].first_in(rows) else {
                 s += 1;
                 continue;
             };
             let mut e = s + 1;
-            while e < strips && self.upload[e] == Some((r0, r1)) {
+            while e < strips && self.upload[e].first_in(rows) == Some((r0, r1)) {
                 e += 1;
             }
-            let (x, w) = (s as u32 * STRIP, (e - s) as u32 * STRIP);
+            // Fewer strips side by side when not one row of them all fits.
+            let strip_row = self.strip() as usize * 4;
+            e = e.min(s + ((max_bytes - given) / strip_row).max(1));
+            let (x, w) = (s as u32 * self.strip(), (e - s) as u32 * self.strip());
             let row = w as usize * 4;
-            let rows = ((max_bytes - given) / row) as u32;
-            if rows == 0 {
+            let n = ((max_bytes - given) / row) as u32;
+            if n == 0 {
                 break;
             }
-            let end = r1.min(r0 + rows);
+            let end = r1.min(r0 + n);
             buf.clear();
-            for j in r0..end {
+            buf.resize(row * (end - r0) as usize, 0);
+            let limits = self.outline_limits();
+            for (k, j) in (r0..end).enumerate() {
+                let out = &mut buf[k * row..(k + 1) * row];
+                let at = ((j * self.side + x) * 4) as usize;
+                out.copy_from_slice(&self.rgba[at..at + row]);
                 if outline > 0.0 {
-                    for i in x..x + w {
-                        buf.extend_from_slice(&self.shown_at(i, j, outline));
-                    }
-                } else {
-                    let at = ((j * self.side + x) * 4) as usize;
-                    buf.extend_from_slice(&self.rgba[at..at + row]);
+                    self.outline_row(j, x, outline, limits, out);
                 }
             }
             put(x, r0, w, end - r0, &buf);
             given += buf.len();
-            let rest = (end < r1).then_some((end, r1));
-            self.upload[s..e].fill(rest);
-            if rest.is_some() {
+            for d in &mut self.upload[s..e] {
+                d.remove((r0, end));
+            }
+            if end < r1 {
                 break;
             }
             s = e;
@@ -693,6 +989,139 @@ mod tests {
         } else {
             base + (n % 3) as i16
         })
+    }
+
+    #[test]
+    fn a_shift_in_place_moves_texels_and_clears_the_rest() {
+        let side = 4i64;
+        let img: Vec<i32> = (0..16).collect();
+        for (di, dj) in [(1, 0), (-1, 0), (0, 2), (0, -1), (2, -3), (-3, 1), (0, 0)] {
+            let mut buf = img.clone();
+            shift_buf(&mut buf, side, di, dj, 1, -1);
+            for j in 0..side {
+                for i in 0..side {
+                    let (si, sj) = (i + di, j + dj);
+                    let want = if (0..side).contains(&si) && (0..side).contains(&sj) {
+                        img[(sj * side + si) as usize]
+                    } else {
+                        -1
+                    };
+                    assert_eq!(
+                        buf[(j * side + i) as usize],
+                        want,
+                        "({di}, {dj}) at ({i}, {j})"
+                    );
+                }
+            }
+        }
+        // Two values a texel.
+        let mut pairs: Vec<u8> = (0..32).collect();
+        shift_buf(&mut pairs, side, 1, 1, 2, 0);
+        assert_eq!(&pairs[..2], &[10, 11]);
+        assert_eq!(&pairs[6..8], &[0, 0]);
+    }
+
+    #[test]
+    fn one_texel_a_block_and_a_resize_paint_the_same() {
+        let p = Projection::default();
+        let fresh = |tpb| {
+            let mut m = Mosaic::with_texels(p, 64, tpb);
+            world(&mut m, 0..4, 0..6, scene);
+            m.recentre(32.0, p.v(64.0, 40.0));
+            paint_all(&mut m, &Ids);
+            m
+        };
+        let one = fresh(1);
+        assert_eq!((one.texels_per_block(), one.strip()), (1, 16));
+        // The tower's top is drawn north of (above) its south face, a row
+        // of texels per map unit now.
+        let i = (8 - one.anchor().0) as u32;
+        let rows: Vec<_> = (0..64).map(|j| one.rgb_at(i, j).map(unid)).collect();
+        let top = rows
+            .iter()
+            .position(|r| *r == Some((8, 24, true)))
+            .expect("top");
+        let side = rows
+            .iter()
+            .position(|r| *r == Some((8, 24, false)))
+            .expect("side");
+        assert!(top < side);
+        let mut moved = fresh(2).resized(64, 1);
+        assert!(moved.painting() && moved.chunks() == one.chunks());
+        moved.recentre(32.0, p.v(64.0, 40.0));
+        paint_all(&mut moved, &Ids);
+        assert_eq!(moved.pixels(), one.pixels());
+    }
+
+    #[test]
+    fn dirty_rows_merge_and_split() {
+        let mut d = Dirty::default();
+        d.add((10, 20));
+        d.add((30, 40));
+        d.add((5, 5));
+        assert_eq!(d.0, [(10, 20), (30, 40)]);
+        d.add((20, 30));
+        assert_eq!(d.0, [(10, 40)]);
+        d.remove((15, 25));
+        assert_eq!(d.0, [(10, 15), (25, 40)]);
+        assert_eq!(d.first_in(Some((12, 30))), Some((12, 15)));
+        assert_eq!(d.first_in(Some((16, 24))), None);
+        assert_eq!(d.first_in(Some((16, 30))), Some((25, 30)));
+        assert_eq!(d.hull(), Some((10, 40)));
+        d.add((0, 100));
+        assert_eq!(d.0, [(0, 100)]);
+        d.remove((0, 100));
+        assert!(d.is_empty() && d.hull().is_none());
+    }
+
+    #[test]
+    fn the_focus_is_painted_and_uploaded_first() {
+        let p = Projection::default();
+        let mut m = Mosaic::new(p, 128);
+        world(&mut m, 0..4, 0..8, hills);
+        m.recentre(32.0, p.v(64.0, 64.0));
+        paint_all(&mut m, &Ids);
+        while m.take_upload(1 << 20, 0.0, |_, _, _, _, _| {}) > 0 {}
+        let painted = m.pixels().to_vec();
+        m.repaint_all();
+        let focus = (40, 50, 70, 80);
+        m.set_focus(Some(focus));
+        assert!(m.focus_painting() && !m.focus_uploading());
+        let mut steps = 0;
+        while !m.window_done(focus.0, focus.1, focus.2, focus.3) {
+            assert!(m.paint_step(&Ids, 0.0, 8));
+            m.take_upload(4096, 0.0, |_, _, _, _, _| {});
+            steps += 1;
+        }
+        // Two strips of 30 rows at 8 a step, not the whole 4 x 128 rows.
+        assert!(steps <= 10, "{steps}");
+        assert!(!m.focus_painting() && !m.focus_uploading());
+        assert_eq!(m.take_focus_upload(1 << 20, 0.0, |_, _, _, _, _| {}), 0);
+        assert!(m.painting());
+        paint_all(&mut m, &Ids);
+        assert_eq!(
+            m.pixels(),
+            &painted[..],
+            "the same image once all is painted"
+        );
+    }
+
+    #[test]
+    fn a_window_is_done_once_its_strips_are_painted_and_uploaded() {
+        let p = Projection::default();
+        let mut m = Mosaic::new(p, 64);
+        world(&mut m, 0..2, 0..4, hills);
+        m.shift(0, p.v(64.0, 32.0).floor() as i32 / 8 * 8 - 16);
+        assert!(!m.window_done(0, 0, 64, 64));
+        paint_all(&mut m, &Ids);
+        assert!(!m.window_done(0, 0, 8, 8), "painted, not uploaded");
+        while m.take_upload(1 << 20, 0.0, |_, _, _, _, _| {}) > 0 {}
+        assert!(m.window_done(0, 0, 64, 64));
+        // A chunk in strip 1 changes: strip 0's window stays done.
+        world(&mut m, 1..2, 1..3, |x, z| hills(x, z).map(|h| h + 1));
+        assert!(m.window_done(0, 0, STRIP, 64));
+        assert!(!m.window_done(STRIP, 0, 64, 64));
+        assert!(m.window_done(0, 0, 0, 0));
     }
 
     #[test]

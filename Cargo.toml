@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["core", "wasm"]
+# The frame-time bench builds wasmtime: its own workspace (bench/README in its main.rs).
+exclude = ["bench"]
 
 [workspace.package]
 edition = "2021"
