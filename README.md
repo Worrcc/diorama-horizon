@@ -5,6 +5,12 @@ around the player, in Diorama's colours: each block's textures from the loaded r
 time, biome tints, clear water by depth, the default style's light, height shade, grade and outlines. A resource
 pack change recolours the map after the reload. `/diorama colour <block>` shows a block's averaged colours.
 
+M6 adds waypoints: **B** adds one where you stand, **U** opens the list (teleport, colour, hide, delete), and
+`/dwp add|del|rename|color|list|hide|show|tp` does the rest (there is no text field, so names go through
+`/dwp`). Death markers (the last 3) are added when you die. Waypoints show as pins on the map, or as badges on its
+edge pointing toward them. They are kept per world in the mod's storage, in Diorama's own `waypoints.json`
+format (RULES.md section 15).
+
 ## What's in and out
 
 TODO (PLAN-v2 section 1). See RULES.md for the numbers taken from Diorama and the dropped features.

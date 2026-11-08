@@ -230,8 +230,7 @@ Settings.java defaults (field lines):
   (Waypoint.java:52-53, :139-147).
 - New waypoint (Waypoints.java:32-43): name `"Waypoint N"` with `N = existingCount + 1`; colour is a **random** bright
   colour at least 1/6 of the hue wheel away from the previous waypoint's colour, with saturation `0.6 + rand*0.35` and
-  value `0.8 + rand*0.2` (waypoint/WaypointColours.java:67-79). The port should pick from `PALETTE` instead to avoid a
-  random source (documented difference), skipping the previous colour.
+  value `0.8 + rand*0.2` (waypoint/WaypointColours.java:67-79). The port keeps this random rule (M6, section 15).
 - Distance: `sqrt((x+0.5-px)^2 + (y-py)^2 + (z+0.5-pz)^2)` (Waypoint.java:131-136).
 - Near rule: `waypointDistance` 0 means any distance; DEATH, TEMPORARY and BED always show (WaypointStore.java:334-340).
   Distance options `0, 64, 128, 256, 512, 1024, 2048` (Settings.java:42).
@@ -250,8 +249,12 @@ Settings.java defaults (field lines):
   next tick (:125-127). Bed time colour is unrelated (that is the info-line colour).
 - Store (waypoint/WaypointStore.java): per world file `.minecraft/diorama/<world>/waypoints.json` (:31, :80), written via
   a temp file and rename (:517); an unreadable file is renamed with a timestamp suffix (:435). The port uses Horizon
-  storage keys per world id instead (see PLAN-v2 section 3.3). The exact JSON schema is **UNKNOWN** here (not read);
-  only the field names above are verified from `Waypoint.java`.
+  storage keys per world id instead (see PLAN-v2 section 3.3). Schema, read in M6: the file is a bare JSON array of
+  Gson-serialised `Waypoint` objects (WaypointStore.java:412-420, :519), pretty-printed; `id` is a UUID string
+  (:44-55), `kind` the enum name, `color` a Java `int` (signed), `created` epoch ms; `map`, `deleted`, `edited`
+  also appear (Waypoint.java:72-77). Missing fields are filled on load: no dimension drops the entry, no id gets a
+  new UUID, a blank name becomes `"Waypoint"`, null strings become `""`, no kind is MANUAL (:446-470).
+  The port's decision is in section 15.
 - Pin layout on the minimap (waypoint/WaypointOverlay.java:38-78):
   - Position: `x = screenX(u(wx+0.5, wz+0.5))`, `y = screenY(v(wx+0.5, wy, wz+0.5))`.
   - Pin size is `Pins.SMALL = 13` on the minimap (`LARGE = 15` fullscreen) (render/Pins.java:22-23), times
@@ -331,3 +334,40 @@ textures (`client-world.texture`); no colour table or texture is in the repo. Di
 - Outlines: one sample per texel (texels are half a block, Diorama's pixels a quarter), depth
   `-(y/sin + v*cot)` per texel, water path stored in eighths of a block.
 - Lava's noise nudge and dry-foliage tints (the host sends no dry-foliage colour) are not applied.
+
+## 15. How the port does waypoints (M6)
+
+Code: `core/src/waypoints.rs`, `core/src/json.rs` (no dependencies), glue in `wasm/src/waypoints.rs`. Decisions:
+
+- **File schema: Diorama's own.** Each world's file is the JSON array of section 10 (Gson field names, two-space
+  pretty print, `color` written as a signed 32-bit int, read signed or unsigned). Fields the port does not use
+  (`map`, `deleted`, `edited`, anything newer) are kept verbatim, so a Diorama file copied into the storage key
+  survives a round trip; TEMPORARY pins are never written. Unreadable entries are skipped (logged); an unreadable
+  file is copied to the key `wp-unreadable` before anything replaces it (Diorama renames it, :435).
+- **Storage: one key per world plus an index.** Key `wp-<FNV-1a 64 of game.world-id, hex>` (world ids are not
+  valid storage keys) and `wp-index`, text lines `used<TAB>key<TAB>world id`. The mod may hold 64 keys
+  (`STORAGE_MAX_KEYS`): 16 settings + the index + `wp-unreadable` leaves room, so at most **45 worlds** keep files.
+  Opening a 46th deletes the file of the world opened longest ago, with a chat line naming it.
+- **`created`:** WASM mods have no wall clock. The port writes `max(world game time in ms, highest created in the
+  file + 1)`, so the DEATHS_KEPT ordering holds even next to imported Diorama times.
+- **New waypoint colour: Diorama's random HSV rule** (WaypointColours.java:67-79: hue at least 1/6 of the wheel from
+  the last waypoint's, s 0.6..0.95, v 0.8..1), not a palette pick (this replaces the M0 note above). The random
+  source is splitmix64, stirred with the game time, the frame count and the player's position (there is no
+  entropy source). UUIDs come from the same source (version 4 layout).
+- **Death marker source:** Diorama uses the combat-kill packet. A client WASM mod sees no packets and Horizon
+  exposes no death event to client mods; the port adds the marker on the tick the player's health goes from above 0
+  to 0 (`game.get-player().health`, which stays 0 while the death screen shows). Name `"Death HH:mm"` uses the
+  world's time of day (no wall clock), colour `0xFF60646C`, newest 3 kept.
+- **Pins and edge badges:** the port's own geometry, not Diorama's pin art: a head `10` px high and
+  `max(10, label + 4)` wide standing `3` px over the spot, the label the initials (Waypoint.java:139-147, at most 4
+  letters). If any corner of the standing pin leaves the view (the circle, for a round map) it becomes a badge at
+  `centre + offset / reach` with Diorama's reach rule (section 10), insets `head/2 + caret` per axis (the radius
+  for a round map), so the badge and its 4 px caret always stay inside. The caret points along the offset's angle,
+  snapped to 32 steps. At most the 64 nearest pins are drawn, farthest first.
+- **List:** `ui.open-screen` (key U): a scrolling list widget (`3. Home  120 m`, the dimension for another one,
+  `hidden`), then Teleport, Colour (next palette colour), Hide/Show and Delete (a second click confirms) for the
+  picked row. Naming is `/dwp add <name>` and `/dwp rename <n|name> <new name>` (no text widget).
+- **Teleport (capability `command`):** the only command the mod runs. `teleport_line` builds `tp @s X.5 Y Z.5`
+  from the record's integers, or `execute in <dim> run tp @s ...` for another dimension; the dimension must be a
+  lowercase resource id (`[a-z0-9_.-]:[a-z0-9_./-]`) or nothing runs. Horizon runs it as the player with the
+  player's permissions (vanilla commands only), so it fails like a typed `/tp` without cheats.

@@ -1,0 +1,197 @@
+# M6: waypoints through /dwp (add, rename, color, list, hide, del, tp), the
+# death marker (the health reaching 0; three kept), the pins in the map box,
+# and the world's file kept across a reload of the mod.
+
+[player]
+x = 8.5
+y = 65.0
+z = 8.5
+
+[clock]
+day-time = 6000
+
+[[step]]
+ticks = 1
+frames = 1
+command = "dwp list"
+expect.feedback = "No waypoints in this world: /dwp add [name] or B"
+expect.commands = ["diorama", "dwp"]
+
+[[step]]
+command = "dwp add Home"
+expect.feedback = "Added 1. Home at 8 65 8 (#3C59ED)"
+
+[[step]]
+player = { x = 200.5, z = 8.5 }
+ticks = 1
+command = "dwp add"
+expect.feedback = "Added 2. Waypoint 2 at 200 65 8 (#DFAC13): /dwp rename 2 <name> names it"
+
+[[step]]
+command = "dwp rename 2 Iron Farm"
+expect.feedback = "Renamed 2. Waypoint 2 to Iron Farm"
+
+[[step]]
+command = "dwp color iron sky"
+expect.feedback = "2. Iron Farm is sky"
+
+[[step]]
+player = { x = 100.5, z = -300.5 }
+ticks = 1
+command = "dwp add \"Far Tower\""
+expect.feedback = "Added 3. Far Tower at 100 65 -301 (#B142CD)"
+
+# Back home: Home is a standing pin, the other two edge badges. With pins
+# off the box loses their shapes.
+[[step]]
+player = { x = 8.5, z = 8.5 }
+ticks = 1
+frames = 1
+expect.canvas = { shapes = 30 }
+
+[[step]]
+command = "dwp pins off"
+expect.feedback = "waypoints_on_map: off"
+
+[[step]]
+frames = 1
+expect.canvas = { shapes = 16 }
+
+[[step]]
+command = "dwp pins on"
+expect.feedback = "waypoints_on_map: on"
+
+[[step]]
+frames = 1
+expect.canvas = { shapes = 30 }
+
+[[step]]
+command = "dwp list"
+expect.chat = ["1. Home  0 m", "2. Iron Farm  192 m", "3. Far Tower  322 m"]
+expect.feedback = "3 waypoints"
+
+# Four deaths: three death markers are kept, the newest.
+[[step]]
+player = { x = 50.5, y = 70.0, z = 50.5, health = 0.0 }
+ticks = 1
+expect.chat = ["Death marker at 50 70 50"]
+
+[[step]]
+player = { health = 20.0, x = 51.5 }
+ticks = 1
+
+[[step]]
+player = { health = 0.0 }
+ticks = 1
+expect.chat = ["Death marker at 51 70 50"]
+
+[[step]]
+player = { health = 20.0, x = 52.5 }
+ticks = 2
+
+[[step]]
+player = { health = 0.0 }
+ticks = 3
+expect.chat = ["Death marker at 52 70 50"]
+
+[[step]]
+player = { health = 20.0, x = 53.5 }
+ticks = 1
+
+[[step]]
+player = { health = 0.0 }
+ticks = 1
+expect.chat = ["Death marker at 53 70 50"]
+
+[[step]]
+player = { health = 20.0, x = 8.5, y = 65.0, z = 8.5 }
+ticks = 1
+command = "dwp list"
+expect.chat = [
+    "1. Home  0 m",
+    "2. Iron Farm  192 m",
+    "3. Far Tower  322 m",
+    "4. Death 12:00  60 m",
+    "5. Death 12:00  61 m",
+    "6. Death 12:00  62 m",
+]
+expect.feedback = "6 waypoints"
+
+[[step]]
+command = "dwp deaths off"
+expect.feedback = "death_markers: off"
+
+[[step]]
+player = { health = 0.0 }
+ticks = 1
+expect.chat = []
+
+[[step]]
+player = { health = 20.0 }
+ticks = 1
+command = "dwp deaths on"
+expect.feedback = "death_markers: on"
+
+[[step]]
+command = "dwp hide 1"
+expect.feedback = "1. Home hidden"
+
+[[step]]
+command = "dwp del Iron Farm"
+expect.feedback = "Deleted 2. Iron Farm"
+
+[[step]]
+command = "dwp del 9"
+expect.error = "no waypoint number 9 (there are 5)"
+
+[[step]]
+command = "dwp color 1 mauve"
+expect.error = "\"mauve\" is not a colour: red, orange, amber, green, teal, sky, indigo, violet, pink, white, silver, slate, brown, lime, ice, blossom, #RRGGBB, next or random"
+
+[[step]]
+command = "dwp fly"
+expect.error = "unknown /dwp fly: /dwp add [name] | del <n|name> | rename <n|name> <new name> | color <n|name> <colour|#RRGGBB> | list | hide|show <n|name> | tp <n|name> | pins on|off | deaths on|off | within <blocks|0>"
+
+# A restart of the mod reads the world's file back.
+[[step]]
+reload = true
+ticks = 1
+frames = 1
+command = "dwp list"
+expect.chat = [
+    "1. Home  0 m  hidden",
+    "2. Far Tower  322 m",
+    "3. Death 12:00  60 m",
+    "4. Death 12:00  61 m",
+    "5. Death 12:00  62 m",
+]
+expect.feedback = "5 waypoints"
+
+[[step]]
+command = "dwp tp far"
+expect.feedback = "Teleporting to Far Tower"
+
+[[step]]
+command = "dwp within 64"
+expect.feedback = "Waypoints show within 64 blocks"
+
+[[step]]
+command = "dwp within 65"
+expect.error = "within: one of 0, 64, 128, 256, 512, 1024, 2048"
+
+[[step]]
+command = "dwp within 0"
+expect.feedback = "Waypoints show at any distance"
+
+# On the title screen there is no world to keep waypoints for.
+[[step]]
+title-screen = true
+ticks = 1
+command = "dwp list"
+expect.error = "not in a world"
+
+[[step]]
+player = { x = 8.5, y = 65.0, z = 8.5 }
+ticks = 1
+command = "dwp list"
+expect.feedback = "5 waypoints"

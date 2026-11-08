@@ -31,8 +31,11 @@ pub const BIOME: usize = 9;
 pub const COMPASS: usize = 10;
 pub const GAME_TIME: usize = 11;
 pub const STYLE: usize = 12;
+pub const WAYPOINTS_ON_MAP: usize = 13;
+pub const DEATH_MARKERS: usize = 14;
+pub const WAYPOINT_DISTANCE: usize = 15;
 
-pub const SETTINGS: [Setting; 13] = [
+pub const SETTINGS: [Setting; 16] = [
     Setting {
         key: "minimap",
         label: "Minimap",
@@ -116,6 +119,31 @@ pub const SETTINGS: [Setting; 13] = [
         label: "Style",
         values: &[("default", "Default"), ("flat", "Flat")],
     },
+    // Waypoints (Settings.java:112-124). The page does not scroll, so these
+    // come last; `/dwp pins|deaths|within` sets them too.
+    Setting {
+        key: "waypoints_on_map",
+        label: "Waypoints on the map",
+        values: ON_OFF,
+    },
+    Setting {
+        key: "death_markers",
+        label: "Death markers",
+        values: ON_OFF,
+    },
+    Setting {
+        key: "waypoint_distance",
+        label: "Show waypoints within",
+        values: &[
+            ("0", "Any distance"),
+            ("64", "64 blocks"),
+            ("128", "128 blocks"),
+            ("256", "256 blocks"),
+            ("512", "512 blocks"),
+            ("1024", "1024 blocks"),
+            ("2048", "2048 blocks"),
+        ],
+    },
 ];
 
 /// The zoom steps in pixels per block, ascending: the plan's subset of
@@ -172,7 +200,10 @@ impl Settings {
     }
     /// "Name: Value" for setting `i`.
     pub fn button(&self, i: usize) -> String {
-        format!("{}: {}", SETTINGS[i].label, SETTINGS[i].values[self.at[i]].1)
+        format!(
+            "{}: {}",
+            SETTINGS[i].label, SETTINGS[i].values[self.at[i]].1
+        )
     }
     pub fn flag(&self, i: usize) -> bool {
         self.stored(i) == "true"
@@ -214,6 +245,21 @@ impl Settings {
         let pct: u32 = self.stored(OPACITY).parse().unwrap_or(100);
         (pct * 255 + 50) / 100
     }
+    /// Sets setting `i` to its stored text `value`; false (and unchanged)
+    /// for a value it does not have.
+    pub fn set_stored(&mut self, i: usize, value: &str) -> bool {
+        match SETTINGS[i].values.iter().position(|(v, _)| *v == value) {
+            Some(at) => {
+                self.at[i] = at;
+                true
+            }
+            None => false,
+        }
+    }
+    /// "Show waypoints within" in blocks, 0 for any distance.
+    pub fn waypoint_distance(&self) -> u32 {
+        self.stored(WAYPOINT_DISTANCE).parse().unwrap_or(0)
+    }
     pub fn flat_style(&self) -> bool {
         self.stored(STYLE) == "flat"
     }
@@ -233,6 +279,8 @@ mod tests {
         assert_eq!(s.alpha(), 255);
         assert!(!s.round() && !s.flat_style());
         assert_eq!(s.stored(GAME_TIME), "off");
+        assert!(s.flag(WAYPOINTS_ON_MAP) && s.flag(DEATH_MARKERS));
+        assert_eq!(s.waypoint_distance(), 0);
     }
 
     #[test]
@@ -260,7 +308,11 @@ mod tests {
         let kept: Vec<_> = (0..SETTINGS.len())
             .map(|i| (SETTINGS[i].key, s.stored(i)))
             .collect();
-        let back = Settings::load(|k| kept.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()));
+        let back = Settings::load(|k| {
+            kept.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        });
         assert_eq!(back, s);
         assert_eq!(s.button(CORNER), "Corner: Top left");
         assert!(!s.flag(MINIMAP));

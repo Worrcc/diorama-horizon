@@ -3,6 +3,7 @@
 
 pub mod bake;
 pub mod cave;
+pub mod json;
 pub mod layout;
 pub mod looks;
 pub mod mosaic;
@@ -11,6 +12,7 @@ pub mod pattern;
 pub mod projection;
 pub mod settings;
 pub mod style;
+pub mod waypoints;
 
 pub use mosaic::Mosaic;
 pub use paint::Painter;

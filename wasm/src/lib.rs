@@ -13,16 +13,21 @@
 //! only talks to Horizon.
 use std::collections::BTreeSet;
 
+mod waypoints;
+
 use diorama_core::{
     bake::{Chunk, TEXELS_PER_BLOCK},
     cave, layout,
     layout::Corner as MapCorner,
-    settings::{self, Settings},
     looks::{self, Average, Builder, Face, Looks, Table, Tint},
-    style, Mosaic, Painter, Projection,
+    settings::{self, Settings},
+    style,
+    waypoints::View,
+    Mosaic, Painter, Projection,
 };
 use horizon_mod_sdk::{
     canvas::{self, ImageShape, Shape},
+    chat,
     client_world::{self, BlockStates, Layer, TintSource},
     game, input,
     render::{self, Corner, FillShape, Point, QuadShape, Rect, TextShape},
@@ -199,6 +204,7 @@ struct Diorama {
     /// they are on the map.
     watch: Option<(u32, Vec<(i32, i32)>)>,
     frame_no: u32,
+    wp: waypoints::Waypoints,
 }
 
 /// What the corner box last showed.
@@ -294,7 +300,10 @@ impl Diorama {
     }
 
     fn save(&self, i: usize) {
-        let _ = storage::set(settings::SETTINGS[i].key, self.settings.stored(i).as_bytes());
+        let _ = storage::set(
+            settings::SETTINGS[i].key,
+            self.settings.stored(i).as_bytes(),
+        );
     }
 
     /// Setting `i` changed (a button or a key): keep it, apply it, redraw.
@@ -332,6 +341,10 @@ impl Diorama {
                 self.settings.cycle(settings::MINIMAP);
                 self.changed(settings::MINIMAP);
             }
+            "waypoint_add" => match self.add_here(None) {
+                Ok(text) | Err(text) => chat::show(&text),
+            },
+            "waypoint_list" => self.show_list(),
             "zoom_in" | "zoom_out" => {
                 self.settings
                     .zoom_by(if name == "zoom_in" { 1 } else { -1 });
@@ -413,7 +426,11 @@ impl Diorama {
         let round = self.settings.round();
         // The box is as wide as its widest info line, the map against the
         // screen edge: right corners right-aligned, left corners left.
-        let widths: Vec<f32> = self.info.iter().map(|(t, _)| render::text_width(t)).collect();
+        let widths: Vec<f32> = self
+            .info
+            .iter()
+            .map(|(t, _)| render::text_width(t))
+            .collect();
         let wide = widths.iter().fold(side, |m, w| m.max(w + 2.0));
         let right = matches!(
             self.settings.corner(),
@@ -423,16 +440,17 @@ impl Diorama {
         let border = if round { 0.0 } else { BORDER };
         let (cx, cy) = self.mosaic.texel_of(u, v);
         let inner = side - 2.0 * border;
-        let (sx, sy, sw, sh) = layout::src_window(
-            cx,
-            cy,
-            inner,
-            self.settings.zoom(),
-            TEXELS_PER_BLOCK,
-            SIDE,
-        );
+        let (sx, sy, sw, sh) =
+            layout::src_window(cx, cy, inner, self.settings.zoom(), TEXELS_PER_BLOCK, SIDE);
         let mid = side / 2.0;
         let mut shapes = Vec::new();
+        let view = View {
+            x: ox + border,
+            y: border,
+            w: inner,
+            h: inner,
+            round,
+        };
         if !round {
             shapes.push(Shape::Fill(FillShape {
                 rect: Rect {
@@ -461,6 +479,7 @@ impl Diorama {
             tint: (self.settings.alpha() << 24) | 0xFF_FFFF,
             round,
         }));
+        self.pin_shapes(p, view, (sx, sy, sw), &mut shapes);
         // The arrow sits where the player is in the window (off centre only
         // when the window is clipped at the mosaic's edge).
         let scale = inner / sw;
@@ -690,9 +709,12 @@ impl Mod for Diorama {
                 .and_then(|v| String::from_utf8(v).ok())
                 .map(|v| v.trim().to_owned())
         });
-        // Diorama's keys: zoom in `=`, zoom out `-`; toggling the map is
-        // unbound until the player picks a key (DioramaClient.java:36-44).
+        // Diorama's keys: new waypoint B, waypoint list U, zoom in `=`, zoom
+        // out `-`; toggling the map is unbound until the player picks a key
+        // (DioramaClient.java:36-44).
         for (name, label, key) in [
+            ("waypoint_add", "New waypoint", "key.keyboard.b"),
+            ("waypoint_list", "Waypoint list", "key.keyboard.u"),
             ("toggle", "Toggle minimap", "key.keyboard.unknown"),
             ("zoom_in", "Zoom minimap in", "key.keyboard.equal"),
             ("zoom_out", "Zoom minimap out", "key.keyboard.minus"),
@@ -731,15 +753,23 @@ impl Mod for Diorama {
             underground: false,
             cut: None,
             layer_tick: 0,
+            wp: waypoints::Waypoints::new(),
         };
         state.page();
         Ok((
             state,
-            Registration::new().on_frame().on_tick().command("diorama"),
+            Registration::new()
+                .on_frame()
+                .on_tick()
+                .command("diorama")
+                .command("dwp"),
         ))
     }
 
-    fn command(&mut self, _name: &str, args: &str) -> Result<Option<String>, String> {
+    fn command(&mut self, name: &str, args: &str) -> Result<Option<String>, String> {
+        if name == "dwp" {
+            return self.dwp(args);
+        }
         match args.split_whitespace().collect::<Vec<_>>()[..] {
             ["zoom", "in"] => self.key("zoom_in"),
             ["zoom", "out"] => self.key("zoom_out"),
@@ -748,12 +778,19 @@ impl Mod for Diorama {
         self.describe(args).map(Some)
     }
 
-    fn ui_select(&mut self, id: u32, _row: u32) {
+    fn ui_select(&mut self, id: u32, row: u32) {
+        if self.list_select(id, row) {
+            return;
+        }
         let i = (id as usize).wrapping_sub(1);
         if i < settings::SETTINGS.len() {
             self.settings.cycle(i);
             self.changed(i);
         }
+    }
+
+    fn ui_closed(&mut self) {
+        self.list_closed();
     }
 
     fn ui_settings_opened(&mut self) {
@@ -767,7 +804,9 @@ impl Mod for Diorama {
             }
         }
         self.check_version();
-        let Some(p) = game::get_player() else {
+        let player = game::get_player();
+        self.waypoints_tick(player.as_ref());
+        let Some(p) = player else {
             if self.dimension.take().is_some() {
                 self.reset();
             }
