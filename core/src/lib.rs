@@ -2,12 +2,14 @@
 //! Numbers and formulas come from RULES.md. No Horizon dependencies.
 
 pub mod bake;
+pub mod cave;
 pub mod layout;
 pub mod looks;
 pub mod mosaic;
 pub mod paint;
 pub mod pattern;
 pub mod projection;
+pub mod settings;
 pub mod style;
 
 pub use mosaic::Mosaic;

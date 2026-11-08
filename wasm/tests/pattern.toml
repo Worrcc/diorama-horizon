@@ -9,9 +9,9 @@ z = -12.5
 
 [[step]]
 frames = 1
-expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1, round = 0 }
+expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 14, images = 1, round = 0 }
 
 [[step]]
 player = { x = 40.0 }
 frames = 1
-expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1, round = 0 }
+expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 14, images = 1, round = 0 }

@@ -27,6 +27,9 @@ pub struct Painter {
     pub style: Style,
     pub tables: Tables,
     proj: Projection,
+    /// The height of the cut when the map shows a cave slice, else none
+    /// (the surface view). Faces fade with their depth under the cut.
+    pub cave: Option<i32>,
 }
 
 fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -40,6 +43,7 @@ impl Painter {
             proj: Projection::new(style.pitch_degrees),
             style,
             tables: Tables::new(),
+            cave: None,
         }
     }
 
@@ -98,9 +102,18 @@ impl Painter {
     fn lit(&self, chunk: &Chunk, col: usize, state: u32, top: bool, y: f64) -> [f32; 3] {
         let look = self.looks.get(state);
         let a = albedo(&self.tables, &look, top, &chunk.tints_at(col));
-        let light = self
-            .style
-            .surface_light(top, y, chunk.sky_at(col), look.emission);
+        let light = match self.cave {
+            Some(cut) => Style::cave_light(
+                chunk.block_light_at(col),
+                chunk.sky_level_at(col),
+                Style::cave_fade(f64::from(cut) - y),
+                look.emission,
+                top,
+            ),
+            None => self
+                .style
+                .surface_light(top, y, chunk.sky_at(col), look.emission),
+        };
         let mut out = mul(a, light);
         let over = chunk.over_at(col);
         if top && over[3] < 1.0 {
@@ -126,7 +139,14 @@ impl Painter {
         let w = self
             .looks
             .albedo(&self.tables, state, true, &chunk.tints_at(col));
-        let light = self.style.water_light(block_y, chunk.sky_at(col));
+        let light = match self.cave {
+            Some(cut) => Style::cave_water_light(
+                chunk.block_light_at(col),
+                chunk.sky_level_at(col),
+                Style::cave_fade(f64::from(cut) - f64::from(block_y)),
+            ),
+            None => self.style.water_light(block_y, chunk.sky_at(col)),
+        };
         self.style.water(floor, w, path, light)
     }
 }
@@ -367,5 +387,25 @@ mod tests {
         let c = column(&[2, 0, 0, 0], 70);
         assert_eq!(p.south(&c, 0, 68, 68.5), p.south(&c, 0, 70, 68.5));
         assert_ne!(p.south(&c, 0, 68, 68.5).rgb, 0);
+    }
+
+    #[test]
+    fn a_cave_slice_is_lit_by_block_light_and_fades_with_depth() {
+        let mut p = painter();
+        let mut c = column(&[2], 40);
+        let day = p.top(&c, 0, 41.0).rgb;
+        p.cave = Some(48);
+        // Unlit rock a few blocks under the cut: the dim base light.
+        let dim = p.top(&c, 0, 41.0).rgb;
+        assert!(channels(dim)[1] < channels(day)[1]);
+        // A torch beside it lights it up.
+        c.light = vec![0x0F; 256];
+        let lit = p.top(&c, 0, 41.0).rgb;
+        assert!(channels(lit)[0] > channels(dim)[0]);
+        // Far under the cut it fades.
+        c.light = Vec::new();
+        let deep = p.top(&c, 0, 41.0).rgb;
+        p.cave = Some(80);
+        assert!(channels(p.top(&c, 0, 41.0).rgb)[1] < channels(deep)[1]);
     }
 }

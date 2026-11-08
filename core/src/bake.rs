@@ -105,6 +105,14 @@ impl Chunk {
     pub fn sky_at(&self, i: usize) -> f32 {
         self.light.get(i).map_or(1.0, |l| f32::from(l >> 4) / 15.0)
     }
+    /// Column `i`'s block light above its top, 0..15.
+    pub fn block_light_at(&self, i: usize) -> f32 {
+        self.light.get(i).map_or(0.0, |l| f32::from(l & 15))
+    }
+    /// Column `i`'s sky light above its top, 0..15.
+    pub fn sky_level_at(&self, i: usize) -> f32 {
+        self.light.get(i).map_or(15.0, |l| f32::from(l >> 4))
+    }
     /// Column `i`'s grass, foliage and water colours.
     pub fn tints_at(&self, i: usize) -> [u32; 3] {
         match self.tints.get(i * 3..i * 3 + 3) {

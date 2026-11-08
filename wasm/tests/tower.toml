@@ -289,7 +289,7 @@ blocks = [
 ]
 ticks = 1
 frames = 4
-expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1, round = 0 }
+expect.canvas = { corner = "top-right", width = 50.0, height = 70.0, shapes = 16, images = 1, round = 0 }
 
 # Place a block on the tower: its chunk's counter moves, the next poll reads
 # it again and the map is repainted.
@@ -297,11 +297,11 @@ expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6,
 blocks = [{ x = 4, y = 70, z = 4, state = "minecraft:red_wool" }]
 ticks = 2
 frames = 2
-expect.canvas = { shapes = 6, images = 1 }
+expect.canvas = { shapes = 16, images = 1 }
 
 # Walk 60 blocks east: the mosaic recentres and keeps drawing.
 [[step]]
 player = { x = 68.5 }
 ticks = 2
 frames = 4
-expect.canvas = { corner = "top-right", shapes = 6, images = 1 }
+expect.canvas = { corner = "top-right", shapes = 16, images = 1 }

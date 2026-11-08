@@ -15,15 +15,19 @@ use std::collections::BTreeSet;
 
 use diorama_core::{
     bake::{Chunk, TEXELS_PER_BLOCK},
-    layout,
+    cave, layout,
+    layout::Corner as MapCorner,
+    settings::{self, Settings},
     looks::{self, Average, Builder, Face, Looks, Table, Tint},
     style, Mosaic, Painter, Projection,
 };
 use horizon_mod_sdk::{
     canvas::{self, ImageShape, Shape},
     client_world::{self, BlockStates, Layer, TintSource},
-    game,
-    render::{self, Corner, FillShape, Point, QuadShape, Rect},
+    game, input,
+    render::{self, Corner, FillShape, Point, QuadShape, Rect, TextShape},
+    storage,
+    ui::{self, ButtonWidget, Widget},
     Mod, Registration,
 };
 
@@ -56,11 +60,15 @@ const MAX_ROWS: u32 = 64;
 /// Frames per cost line in the log.
 const LOG_FRAMES: u32 = 600;
 
-/// GUI pixels per block (Diorama's default zoom, Settings.java:69).
-const ZOOM: f32 = 2.0;
-/// Box side as a percentage of the GUI width.
-const SIZE_PERCENT: f32 = 10.0;
 const BORDER: f32 = 1.0;
+/// The eye above the feet, for the light and the slice.
+const EYE: f64 = 1.62;
+/// Ticks between looks at the light (the cave rule).
+const LAYER_TICKS: u64 = 4;
+const TEXT_COLOR: u32 = 0xFF_FFFF;
+const NIGHT_COLOR: u32 = 0x9C_C4FF;
+const NORTH_COLOR: u32 = 0xFF_6B6B;
+const LETTER_BOX: u32 = 0xA010_1418;
 const BORDER_COLOR: u32 = 0xFF20_2020;
 const ARROW_COLOR: u32 = 0xFFE8_3030;
 const ARROW_OUTLINE: u32 = 0xFF00_0000;
@@ -174,7 +182,18 @@ struct Diorama {
     player_chunk: Option<(i32, i32)>,
     dimension: Option<String>,
     /// What the box last showed, so it is only sent again when it changes.
-    shown: Option<(f32, [i32; 5])>,
+    shown: Option<Shown>,
+    settings: Settings,
+    /// Bumped when a setting or the info lines change: the box is sent again.
+    rev: u32,
+    /// The lines under the map, and whether the clock one is at night.
+    info: Vec<(String, u32)>,
+    /// The dimension has a roof (the Nether), and the cave rule's state: the
+    /// player is underground, and the height of the slice (none: the surface).
+    ceiling: bool,
+    underground: bool,
+    cut: Option<i32>,
+    layer_tick: u64,
     cost: Cost,
     /// A few chunks a poll said changed, and the frame count then: logged when
     /// they are on the map.
@@ -182,9 +201,153 @@ struct Diorama {
     frame_no: u32,
 }
 
+/// What the corner box last showed.
+#[derive(PartialEq)]
+struct Shown {
+    rev: u32,
+    side: f32,
+    view: [i32; 5],
+}
+
 impl Diorama {
+    fn layer(&self) -> Layer {
+        self.cut.map_or(Layer::Surface, Layer::Below)
+    }
+
+    /// The slice (or the surface) the cave rule wants now; when it changed,
+    /// the cached chunks are read again in that layer.
+    fn update_layer(&mut self, p: &game::Player) {
+        let head = (p.y + EYE).floor() as i32;
+        let (bx, bz) = (p.x.floor() as i32, p.z.floor() as i32);
+        let sky = |dy: i32| client_world::light(bx, head + dy, bz).map(|l| l >> 4);
+        let Some(here) = sky(0) else { return };
+        self.underground = cave::underground(self.underground, self.ceiling, here);
+        let s = &self.settings;
+        let slice = cave::slice(
+            s.flag(settings::AUTO_CAVES),
+            s.flag(settings::PREFER_SURFACE),
+            self.underground,
+            || cave::depth_to_sky(|dy| sky(dy as i32)),
+            self.ceiling,
+        );
+        let want = slice.then(|| cave::follow(self.cut, head));
+        if want != self.cut {
+            horizon_mod_sdk::info(&format!(
+                "diorama: layer {:?} -> {:?} (underground {}, ceiling {}, head {head})",
+                self.cut, want, self.underground, self.ceiling
+            ));
+            self.set_cut(want);
+        }
+    }
+
+    fn set_cut(&mut self, cut: Option<i32>) {
+        self.cut = cut;
+        self.painter.cave = cut;
+        self.mosaic.outline_depth = if cut.is_some() {
+            style::CAVE_OUTLINE_DEPTH
+        } else {
+            style::OUTLINE_DEPTH
+        };
+        self.pending.extend(self.mosaic.keys());
+        self.rev = self.rev.wrapping_add(1);
+    }
+
+    /// The lines under the map: coordinates, biome, game time.
+    fn update_info(&mut self, p: &game::Player) {
+        let s = &self.settings;
+        let mut lines = Vec::new();
+        let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        if s.flag(settings::COORDINATES) {
+            lines.push((format!("{x}, {y}, {z}"), TEXT_COLOR));
+        }
+        if s.flag(settings::BIOME) {
+            if let Some(b) = client_world::biome(x, y, z) {
+                lines.push((layout::biome_name(&b), TEXT_COLOR));
+            }
+        }
+        if s.stored(settings::GAME_TIME) == "clock" {
+            if let Some(c) = game::get_clock() {
+                // Night, as vanilla counts the day: 13000 to 23000 ticks.
+                let dark = (13000..23000).contains(&(c.day_time % 24000));
+                lines.push((
+                    layout::clock_text(c.day_time),
+                    if dark { NIGHT_COLOR } else { TEXT_COLOR },
+                ));
+            }
+        }
+        if lines != self.info {
+            self.info = lines;
+            self.rev = self.rev.wrapping_add(1);
+        }
+    }
+
+    fn page(&self) {
+        let widgets: Vec<Widget> = (0..settings::SETTINGS.len())
+            .map(|i| {
+                Widget::Button(ButtonWidget {
+                    id: i as u32 + 1,
+                    label: self.settings.button(i),
+                })
+            })
+            .collect();
+        ui::set_settings(&widgets);
+    }
+
+    fn save(&self, i: usize) {
+        let _ = storage::set(settings::SETTINGS[i].key, self.settings.stored(i).as_bytes());
+    }
+
+    /// Setting `i` changed (a button or a key): keep it, apply it, redraw.
+    fn changed(&mut self, i: usize) {
+        self.save(i);
+        self.rev = self.rev.wrapping_add(1);
+        match i {
+            settings::MINIMAP => {
+                if !self.settings.flag(settings::MINIMAP) {
+                    canvas::clear_corner();
+                    self.shown = None;
+                }
+            }
+            settings::AUTO_CAVES | settings::PREFER_SURFACE => self.layer_tick = 0,
+            settings::STYLE => {
+                // The flat style's light and colours, on the default's camera.
+                self.painter.style = if self.settings.flat_style() {
+                    style::Style {
+                        pitch_degrees: style::DEFAULT.pitch_degrees,
+                        ..style::FLAT
+                    }
+                } else {
+                    style::DEFAULT
+                };
+                self.mosaic.repaint_all();
+            }
+            _ => {}
+        }
+        self.page();
+    }
+
+    fn key(&mut self, name: &str) {
+        match name {
+            "toggle" => {
+                self.settings.cycle(settings::MINIMAP);
+                self.changed(settings::MINIMAP);
+            }
+            "zoom_in" | "zoom_out" => {
+                self.settings
+                    .zoom_by(if name == "zoom_in" { 1 } else { -1 });
+                self.changed(settings::ZOOM);
+            }
+            _ => {}
+        }
+    }
+
     fn reset(&mut self) {
         self.mosaic.clear();
+        self.underground = false;
+        self.layer_tick = 0;
+        if self.cut.is_some() {
+            self.set_cut(None);
+        }
         self.pending.clear();
         self.since = 0;
         self.player_chunk = None;
@@ -205,7 +368,7 @@ impl Diorama {
         for c in &near {
             self.pending.remove(c);
         }
-        match client_world::columns(&near, Layer::Surface, DEPTH) {
+        match client_world::columns(&near, self.layer(), DEPTH) {
             Ok(read) => {
                 for (key, cols) in near.iter().zip(read) {
                     let chunk = cols.map(|c| {
@@ -226,66 +389,86 @@ impl Diorama {
 
     fn draw(&mut self, p: &game::Player) {
         let (gui_w, _) = render::gui_size();
-        let side = layout::box_side(gui_w, SIZE_PERCENT);
+        let side = layout::box_side(gui_w, self.settings.size_percent());
         let proj = *self.mosaic.projection();
         let (u, v) = (proj.u(p.x), proj.v(p.y, p.z));
         let anchor = self.mosaic.anchor();
         // Only resend when the view moved by a tenth of a texel or a degree.
-        let key = (
+        let key = Shown {
+            rev: self.rev,
             side,
-            [
+            view: [
                 (u * 20.0) as i32,
                 (v * 20.0) as i32,
                 p.yaw.rem_euclid(360.0) as i32,
                 anchor.0,
                 anchor.1,
             ],
-        );
-        if self.shown == Some(key) {
+        };
+        if self.shown.as_ref() == Some(&key) {
             return;
         }
         self.shown = Some(key);
 
+        let round = self.settings.round();
+        // The box is as wide as its widest info line, the map against the
+        // screen edge: right corners right-aligned, left corners left.
+        let widths: Vec<f32> = self.info.iter().map(|(t, _)| render::text_width(t)).collect();
+        let wide = widths.iter().fold(side, |m, w| m.max(w + 2.0));
+        let right = matches!(
+            self.settings.corner(),
+            MapCorner::TopRight | MapCorner::BottomRight
+        );
+        let ox = if right { wide - side } else { 0.0 };
+        let border = if round { 0.0 } else { BORDER };
         let (cx, cy) = self.mosaic.texel_of(u, v);
-        let inner = side - 2.0 * BORDER;
-        let (sx, sy, sw, sh) = layout::src_window(cx, cy, inner, ZOOM, TEXELS_PER_BLOCK, SIDE);
+        let inner = side - 2.0 * border;
+        let (sx, sy, sw, sh) = layout::src_window(
+            cx,
+            cy,
+            inner,
+            self.settings.zoom(),
+            TEXELS_PER_BLOCK,
+            SIDE,
+        );
         let mid = side / 2.0;
-        let mut shapes = vec![
-            Shape::Fill(FillShape {
+        let mut shapes = Vec::new();
+        if !round {
+            shapes.push(Shape::Fill(FillShape {
                 rect: Rect {
-                    x: 0.0,
+                    x: ox,
                     y: 0.0,
                     w: side,
                     h: side,
                 },
                 color: BORDER_COLOR,
-            }),
-            Shape::Image(ImageShape {
-                image: self.image,
-                src: Rect {
-                    x: sx,
-                    y: sy,
-                    w: sw,
-                    h: sh,
-                },
-                dst: Rect {
-                    x: BORDER,
-                    y: BORDER,
-                    w: inner,
-                    h: inner,
-                },
-                tint: 0xFFFF_FFFF,
-                round: false,
-            }),
-        ];
+            }));
+        }
+        shapes.push(Shape::Image(ImageShape {
+            image: self.image,
+            src: Rect {
+                x: sx,
+                y: sy,
+                w: sw,
+                h: sh,
+            },
+            dst: Rect {
+                x: ox + border,
+                y: border,
+                w: inner,
+                h: inner,
+            },
+            tint: (self.settings.alpha() << 24) | 0xFF_FFFF,
+            round,
+        }));
         // The arrow sits where the player is in the window (off centre only
         // when the window is clipped at the mosaic's edge).
         let scale = inner / sw;
         let (ax, ay) = (
-            BORDER + (cx as f32 - sx) * scale,
-            BORDER + (cy as f32 - sy) * scale,
+            ox + border + (cx as f32 - sx) * scale,
+            border + (cy as f32 - sy) * scale,
         );
-        let ax = if ax.is_finite() { ax } else { mid };
+        let ax = if ax.is_finite() { ax } else { ox + mid };
         let ay = if ay.is_finite() { ay } else { mid };
         let size = (side / 10.0).clamp(6.0, 14.0);
         for (s, color) in [(size + 2.0, ARROW_OUTLINE), (size, ARROW_COLOR)] {
@@ -297,7 +480,57 @@ impl Diorama {
                 }));
             }
         }
-        canvas::set_corner(Corner::TopRight, side, side, &shapes);
+        if self.settings.flag(settings::COMPASS) {
+            // N E S W at the edges of the map (MinimapHud.java:294-309);
+            // the map faces north.
+            let at = [
+                ("N", ox + mid, 1.0, NORTH_COLOR),
+                ("E", ox + side - 5.0, mid - 4.0, TEXT_COLOR),
+                ("S", ox + mid, side - 9.0, TEXT_COLOR),
+                ("W", ox + 5.0, mid - 4.0, TEXT_COLOR),
+            ];
+            for (letter, x, y, color) in at {
+                shapes.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: x - 5.0,
+                        y: y - 1.0,
+                        w: 10.0,
+                        h: 9.0,
+                    },
+                    color: LETTER_BOX,
+                }));
+                shapes.push(Shape::Text(TextShape {
+                    text: letter.into(),
+                    at: Point { x, y },
+                    color,
+                    centered: true,
+                    shadow: false,
+                }));
+            }
+        }
+        // Info lines under the map, 10 px each, centred on it and kept in the box.
+        let mut height = side;
+        for ((text, color), w) in self.info.iter().zip(&widths) {
+            let x = (ox + mid - w / 2.0).clamp(0.0, (wide - w).max(0.0));
+            shapes.push(Shape::Text(TextShape {
+                text: text.clone(),
+                at: Point { x, y: height + 2.0 },
+                color: *color,
+                centered: false,
+                shadow: true,
+            }));
+            height += layout::LINE;
+        }
+        if !self.info.is_empty() {
+            height += 2.0;
+        }
+        let corner = match self.settings.corner() {
+            MapCorner::TopRight => Corner::TopRight,
+            MapCorner::TopLeft => Corner::TopLeft,
+            MapCorner::BottomLeft => Corner::BottomLeft,
+            MapCorner::BottomRight => Corner::BottomRight,
+        };
+        canvas::set_corner(corner, wide, height, &shapes);
     }
 
     /// Starts a rebuild of the looks when the packs reloaded.
@@ -377,7 +610,14 @@ impl Diorama {
                     l.tint
                 ))
             }
-            Some(other) => Err(format!("unknown /diorama {other}: try colour <block>")),
+            Some("layer") => Ok(match self.cut {
+                Some(y) => format!("cave slice at y {y}"),
+                None => "surface".into(),
+            }),
+            Some("zoom") => Ok(format!("zoom {} px per block", self.settings.zoom())),
+            Some(other) => Err(format!(
+                "unknown /diorama {other}: try colour <block>, layer or zoom [in|out]"
+            )),
         }
     }
 
@@ -445,6 +685,29 @@ impl Mod for Diorama {
             },
         ));
         let style = style::DEFAULT;
+        let settings = Settings::load(|k| {
+            storage::get(k)
+                .and_then(|v| String::from_utf8(v).ok())
+                .map(|v| v.trim().to_owned())
+        });
+        // Diorama's keys: zoom in `=`, zoom out `-`; toggling the map is
+        // unbound until the player picks a key (DioramaClient.java:36-44).
+        for (name, label, key) in [
+            ("toggle", "Toggle minimap", "key.keyboard.unknown"),
+            ("zoom_in", "Zoom minimap in", "key.keyboard.equal"),
+            ("zoom_out", "Zoom minimap out", "key.keyboard.minus"),
+        ] {
+            if let Err(e) = input::register_key(name, label, key) {
+                horizon_mod_sdk::warn(&format!("register-key {name}: {e}"));
+            }
+        }
+        let mut style = style;
+        if settings.flat_style() {
+            style = style::Style {
+                pitch_degrees: style::DEFAULT.pitch_degrees,
+                ..style::FLAT
+            };
+        }
         let state = Diorama {
             mosaic: Mosaic::new(Projection::new(style.pitch_degrees), SIDE),
             painter: Painter::new(looks, style),
@@ -461,7 +724,15 @@ impl Mod for Diorama {
             cost: Cost::default(),
             watch: None,
             frame_no: 0,
+            settings,
+            rev: 0,
+            info: Vec::new(),
+            ceiling: false,
+            underground: false,
+            cut: None,
+            layer_tick: 0,
         };
+        state.page();
         Ok((
             state,
             Registration::new().on_frame().on_tick().command("diorama"),
@@ -469,10 +740,32 @@ impl Mod for Diorama {
     }
 
     fn command(&mut self, _name: &str, args: &str) -> Result<Option<String>, String> {
+        match args.split_whitespace().collect::<Vec<_>>()[..] {
+            ["zoom", "in"] => self.key("zoom_in"),
+            ["zoom", "out"] => self.key("zoom_out"),
+            _ => {}
+        }
         self.describe(args).map(Some)
     }
 
-    fn tick(&mut self, _tick: u64) {
+    fn ui_select(&mut self, id: u32, _row: u32) {
+        let i = (id as usize).wrapping_sub(1);
+        if i < settings::SETTINGS.len() {
+            self.settings.cycle(i);
+            self.changed(i);
+        }
+    }
+
+    fn ui_settings_opened(&mut self) {
+        self.page();
+    }
+
+    fn tick(&mut self, tick: u64) {
+        for event in input::poll() {
+            if let input::Event::KeyDown(name) = event {
+                self.key(&name);
+            }
+        }
         self.check_version();
         let Some(p) = game::get_player() else {
             if self.dimension.take().is_some() {
@@ -483,7 +776,16 @@ impl Mod for Diorama {
         if self.dimension.as_deref() != Some(p.dimension.as_str()) {
             self.reset();
             self.dimension = Some(p.dimension.clone());
+            self.ceiling = client_world::dimension().is_some_and(|d| d.ceiling);
         }
+        if !self.settings.flag(settings::MINIMAP) {
+            return;
+        }
+        if tick >= self.layer_tick {
+            self.layer_tick = tick + LAYER_TICKS;
+            self.update_layer(&p);
+        }
+        self.update_info(&p);
         let pc = ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4);
         if self.player_chunk != Some(pc) {
             // Chunks loaded long ago come into range as the player walks:
@@ -512,6 +814,9 @@ impl Mod for Diorama {
             }
             return;
         };
+        if !self.settings.flag(settings::MINIMAP) {
+            return;
+        }
         let proj = *self.mosaic.projection();
         let (u, v) = (proj.u(p.x), proj.v(p.y, p.z));
         let centre = self

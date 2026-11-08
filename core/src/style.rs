@@ -72,6 +72,14 @@ pub const OUTLINE_DEPTH: f32 = 1.5;
 /// Outlines under water fade to a third over this much water
 /// (`OUTLINE_WATER_FADE`, TileBaker.java:82).
 pub const OUTLINE_WATER_FADE: f32 = 6.0;
+/// Cave slices: outline threshold, the depth fade and the light's soft knee
+/// (TileBaker.java:85, :91, :93; Lighting.java:13, :20, :118-123).
+pub const CAVE_OUTLINE_DEPTH: f32 = 3.0;
+pub const CAVE_FADE: f32 = 12.0;
+pub const CAVE_FADE_START: f32 = 6.0;
+const CAVE_KNEE: f32 = 0.5;
+const CAVE_CEILING: f32 = 0.8;
+const CAVE_BASE: f32 = 0.42;
 /// What plants and glass let through, and lay over what is under them
 /// (TileBaker.java:1052).
 pub const PLANT_WEIGHT: f32 = 0.4;
@@ -166,6 +174,48 @@ impl Style {
             }
         }
         light
+    }
+
+    /// How much a cave slice fades a face `below` blocks under the cut:
+    /// full for the first [`CAVE_FADE_START`], then `exp(-d / CAVE_FADE)`
+    /// (TileBaker.java:560-562).
+    pub fn cave_fade(below: f64) -> f32 {
+        ((CAVE_FADE_START - below.max(0.0) as f32).min(0.0) / CAVE_FADE).exp()
+    }
+
+    /// The light on a face in a cave slice (Lighting.java:106-133, no corner
+    /// AO): `block` and `sky` light 0..15 in front of the face, `fade` from
+    /// [`Style::cave_fade`], `emission` 0..1, `top` for a top face.
+    pub fn cave_light(block: f32, sky: f32, fade: f32, emission: f32, top: bool) -> [f32; 3] {
+        let warm = (block / 15.0).powf(1.5);
+        let cool = (sky / 15.0 * 0.8).powf(1.5);
+        let mut l = [
+            (CAVE_BASE * 0.92 + warm * 0.9 + cool * 0.6) * fade,
+            (CAVE_BASE * 0.96 + warm * 0.75 + cool * 0.65) * fade,
+            (CAVE_BASE * 1.08 + warm * 0.5 + cool * 0.75) * fade,
+        ];
+        let peak = l[0].max(l[1]).max(l[2]);
+        if peak > CAVE_KNEE {
+            let range = CAVE_CEILING - CAVE_KNEE;
+            let eased = CAVE_KNEE + range * (1.0 - (-(peak - CAVE_KNEE) / range).exp());
+            for c in &mut l {
+                *c *= eased / peak;
+            }
+        }
+        for c in &mut l {
+            if emission > 0.0 {
+                *c = c.max(0.35 + emission * 0.85);
+            }
+            if !top {
+                *c *= SIDE;
+            }
+        }
+        l
+    }
+
+    /// The light on water in a cave slice (Lighting.java:102-104).
+    pub fn cave_water_light(block: f32, sky: f32, fade: f32) -> f32 {
+        (CAVE_BASE + (block.max(sky * 0.8) / 15.0).powf(1.5) * 0.8) * fade
     }
 
     /// The light on a water surface whose top water block is at `block_y`
@@ -349,5 +399,33 @@ mod tests {
         ));
         assert_eq!(darken(0xFF_8040, 0.5), 0x80_4020);
         assert_eq!(darken(0x64_6464, 0.62), 0x3E_3E3E); // 62.0
+    }
+
+    #[test]
+    fn cave_fade_starts_after_six_blocks() {
+        assert_eq!(Style::cave_fade(0.0), 1.0);
+        assert_eq!(Style::cave_fade(6.0), 1.0);
+        assert!((Style::cave_fade(18.0) - (-1.0f32).exp()).abs() < 1e-6);
+        // Above the cut (a negative depth) is not brighter.
+        assert_eq!(Style::cave_fade(-3.0), 1.0);
+    }
+
+    #[test]
+    fn cave_light_by_hand() {
+        // No light at all: the base 0.42 times its tint, a side 0.82 of that.
+        let dark = Style::cave_light(0.0, 0.0, 1.0, 0.0, true);
+        assert!((dark[0] - 0.42 * 0.92).abs() < 1e-6);
+        assert!((dark[2] - 0.42 * 1.08).abs() < 1e-6);
+        let side = Style::cave_light(0.0, 0.0, 1.0, 0.0, false);
+        assert!((side[1] - 0.42 * 0.96 * 0.82).abs() < 1e-6);
+        // Torch light is warm and eases under the 0.8 ceiling.
+        let torch = Style::cave_light(15.0, 0.0, 1.0, 0.0, true);
+        assert!(torch[0] > torch[2] && torch[0] > dark[0]);
+        assert!(torch.iter().all(|&c| c <= 0.8 + 1e-6));
+        // Emission lifts a channel to 0.35 + 0.85 e at least.
+        let glow = Style::cave_light(0.0, 0.0, 0.2, 1.0, true);
+        assert!(glow.iter().all(|&c| (c - 1.2).abs() < 1e-6));
+        // Depth dims it.
+        assert!(Style::cave_light(0.0, 0.0, 0.3, 0.0, true)[1] < dark[1]);
     }
 }

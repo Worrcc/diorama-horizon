@@ -5,5 +5,5 @@ description = "Unofficial port of the Diorama minimap (MIT, Dara Adedeji). The a
 authors = ["Worrcc", "Dara Adedeji (Diorama)"]
 api = "0.1"
 side = "client"
-capabilities = ["game-read", "render", "world-read"]
-experimental = ["render", "world-read"]
+capabilities = ["game-read", "render", "world-read", "input", "ui", "storage"]
+experimental = ["render", "world-read", "input", "ui"]

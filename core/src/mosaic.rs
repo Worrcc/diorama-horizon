@@ -67,6 +67,9 @@ pub struct Mosaic {
     paint: Vec<Rows>,
     upload: Vec<Rows>,
     pub stats: Stats,
+    /// How much nearer a neighbour must be to draw an outline: [`OUTLINE_DEPTH`],
+    /// or [`crate::style::CAVE_OUTLINE_DEPTH`] in a cave slice (TileBaker.java:891).
+    pub outline_depth: f32,
 }
 
 fn hull(slot: &mut Rows, (a, b): (u32, u32)) {
@@ -195,6 +198,7 @@ impl Mosaic {
             paint: vec![None; strips],
             upload: vec![None; strips],
             stats: Stats::default(),
+            outline_depth: OUTLINE_DEPTH,
         }
     }
     pub fn side(&self) -> u32 {
@@ -535,7 +539,7 @@ impl Mosaic {
         let here = self.depth(at, v(j));
         let nearer = |ni: u32, nj: u32| {
             let n = (nj * side + ni) as usize;
-            self.rgba[n * 4 + 3] != 0 && here - self.depth(n, v(nj)) > OUTLINE_DEPTH
+            self.rgba[n * 4 + 3] != 0 && here - self.depth(n, v(nj)) > self.outline_depth
         };
         let edge = (i > 0 && nearer(i - 1, j))
             || (i + 1 < side && nearer(i + 1, j))

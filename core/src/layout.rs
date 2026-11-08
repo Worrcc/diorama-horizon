@@ -1,5 +1,40 @@
 //! Where the map box goes and what is drawn on it, in GUI pixels.
 
+/// A screen corner for the map box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    TopRight,
+    TopLeft,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Info line height in GUI pixels (MinimapHud.java:174).
+pub const LINE: f32 = 10.0;
+
+/// "minecraft:dark_forest" as a name: "Dark Forest" (Diorama shows the game's
+/// translated name; the port has no language file, so it capitalises the id).
+pub fn biome_name(id: &str) -> String {
+    let path = id.rsplit(':').next().unwrap_or(id);
+    path.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The game time as a 24 hour clock (MinimapHud.java:337-350): the day-time
+/// tick 0 is 06:00, `1000` ticks an hour.
+pub fn clock_text(day_time: u64) -> String {
+    let in_day = (day_time + 6000) % 24000;
+    format!("{:02}:{:02}", in_day / 1000, (in_day % 1000) * 60 / 1000)
+}
+
 /// The box side for a GUI width: 10% of it, kept to 48..=224 (PLAN-v2 section 3.2).
 pub fn box_side(gui_width: f32, percent: f32) -> f32 {
     let s = (gui_width * percent / 100.0 + 0.5) as i32 as f32;
@@ -49,6 +84,16 @@ pub fn arrow(cx: f32, cy: f32, size: f32, yaw_degrees: f32) -> [[(f32, f32); 4];
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_and_clock() {
+        assert_eq!(biome_name("minecraft:dark_forest"), "Dark Forest");
+        assert_eq!(biome_name("plains"), "Plains");
+        assert_eq!(clock_text(0), "06:00");
+        assert_eq!(clock_text(6000), "12:00");
+        assert_eq!(clock_text(18000), "00:00");
+        assert_eq!(clock_text(23999), "05:59");
+    }
 
     #[test]
     fn ten_percent_clamped() {

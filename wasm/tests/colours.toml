@@ -27,7 +27,7 @@ blocks = [
 ]
 ticks = 1
 frames = 4
-expect.canvas = { corner = "top-right", width = 48.0, height = 48.0, shapes = 6, images = 1 }
+expect.canvas = { corner = "top-right", width = 50.0, height = 70.0, shapes = 16, images = 1 }
 
 [[step]]
 command = "diorama colour stone"
@@ -49,7 +49,7 @@ blocks = [
 ]
 ticks = 1
 frames = 8
-expect.canvas = { shapes = 6, images = 1 }
+expect.canvas = { shapes = 16, images = 1 }
 
 [[step]]
 command = "diorama colour barrier_glass"

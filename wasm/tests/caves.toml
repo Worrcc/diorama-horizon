@@ -1,0 +1,50 @@
+# M5: the slice rule. The Overworld in the test has full sky light, so the map
+# stays on the surface; the Nether always shows a slice, cut at the head's block
+# (feet 40 + eye 1.62 = 41), following the head down at once and up after 3.
+
+[player]
+x = 8.5
+y = 70.0
+z = 8.5
+
+[[step]]
+ticks = 8
+frames = 1
+command = "diorama layer"
+expect.feedback = "surface"
+
+[[step]]
+player = { dimension = "minecraft:the_nether", y = 40.0 }
+ticks = 8
+frames = 2
+command = "diorama layer"
+expect.feedback = "cave slice at y 41"
+expect.canvas = { corner = "top-right", images = 1 }
+
+# A jump of one or two blocks keeps the cut.
+[[step]]
+player = { y = 42.0 }
+ticks = 8
+command = "diorama layer"
+expect.feedback = "cave slice at y 41"
+
+# Three up moves it.
+[[step]]
+player = { y = 43.0 }
+ticks = 8
+command = "diorama layer"
+expect.feedback = "cave slice at y 44"
+
+# Down: at once.
+[[step]]
+player = { y = 30.0 }
+ticks = 8
+command = "diorama layer"
+expect.feedback = "cave slice at y 31"
+
+# Back in the Overworld, under the open sky: the surface.
+[[step]]
+player = { dimension = "minecraft:overworld", y = 70.0 }
+ticks = 8
+command = "diorama layer"
+expect.feedback = "surface"

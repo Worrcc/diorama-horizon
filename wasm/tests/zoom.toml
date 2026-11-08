@@ -1,0 +1,60 @@
+# M5: the zoom keys' steps (the /diorama zoom in|out command does what the keys
+# do), the default of 2 pixels per block, the ends of the table, and a setting
+# kept across a reload of the mod (its storage stays).
+
+[player]
+x = 8.5
+y = 65.0
+z = 8.5
+
+[[step]]
+ticks = 1
+frames = 2
+command = "diorama zoom"
+expect.feedback = "zoom 2 px per block"
+
+[[step]]
+command = "diorama zoom in"
+expect.feedback = "zoom 3 px per block"
+
+[[step]]
+command = "diorama zoom in"
+expect.feedback = "zoom 4 px per block"
+
+[[step]]
+command = "diorama zoom in"
+expect.feedback = "zoom 4 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 3 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 2 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 1.5 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 1 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 0.5 px per block"
+
+[[step]]
+command = "diorama zoom out"
+expect.feedback = "zoom 0.5 px per block"
+frames = 1
+expect.canvas = { corner = "top-right", width = 50.0, height = 70.0, images = 1 }
+
+# A restart of the mod reads the kept zoom, not the default.
+[[step]]
+reload = true
+ticks = 1
+frames = 1
+command = "diorama zoom"
+expect.feedback = "zoom 0.5 px per block"
