@@ -1,9 +1,9 @@
 id = "diorama"
 name = "Diorama"
 version = "0.0.1"
-description = "Unofficial port of the Diorama minimap (MIT, Dara Adedeji). M2 test pattern: a projected checkerboard and your arrow at the top right."
+description = "Unofficial port of the Diorama minimap (MIT, Dara Adedeji). M3: the angled map of the loaded chunks, top and south faces, at the top right."
 authors = ["Worrcc", "Dara Adedeji (Diorama)"]
 api = "0.1"
 side = "client"
-capabilities = ["game-read", "render"]
-experimental = ["render"]
+capabilities = ["game-read", "render", "world-read"]
+experimental = ["render", "world-read"]

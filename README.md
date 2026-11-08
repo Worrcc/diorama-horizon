@@ -1,6 +1,7 @@
 **Unofficial** port of Diorama by Dara Adedeji (github.com/SunkenInTime/minecraft-orthogonal-map, Modrinth `diorama-map`) to Horizon. Not affiliated with or endorsed by the Diorama author or Mojang.
 
-Status: M0 scaffold. Nothing runs yet.
+Status: M3. The map bakes the loaded chunks (top and south faces, nearest face per texel) into a 512 x 512 mosaic
+around the player. Colours are a placeholder (the game's map colours) until M4.
 
 ## What's in and out
 

@@ -1,10 +1,13 @@
 //! Pure logic for the Diorama port: projection, baking, settings, waypoints.
 //! Numbers and formulas come from RULES.md. No Horizon dependencies.
 
+pub mod bake;
 pub mod layout;
+pub mod mosaic;
 pub mod pattern;
 pub mod projection;
 
+pub use mosaic::Mosaic;
 pub use projection::Projection;
 
 /// Default camera pitch in degrees (RULES.md section 1; MapStyle.java:62).
