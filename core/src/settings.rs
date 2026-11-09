@@ -166,12 +166,16 @@ pub fn zoom_step(zoom: f32) -> usize {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     at: [usize; SETTINGS.len()],
+    offset_x: i32,
+    offset_y: i32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             at: [0; SETTINGS.len()],
+            offset_x: 0,
+            offset_y: 0,
         }
     }
 }
@@ -188,6 +192,8 @@ impl Settings {
                 }
             }
         }
+        s.offset_x = get("offset_x").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        s.offset_y = get("offset_y").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
         s
     }
     /// The next value of setting `i`, wrapping.
@@ -215,6 +221,19 @@ impl Settings {
             "bottom_right" => Corner::BottomRight,
             _ => Corner::TopRight,
         }
+    }
+    /// Minimap's inward GUI-pixel offset from its anchor corner.
+    pub fn offset(&self) -> (f32, f32) {
+        (self.offset_x as f32, self.offset_y as f32)
+    }
+    /// Store inward offsets as integer GUI pixels.
+    pub fn set_offset(&mut self, offset: (f32, f32)) {
+        self.offset_x = offset.0.round() as i32;
+        self.offset_y = offset.1.round() as i32;
+    }
+    /// Stored values for independent offset storage keys.
+    pub fn offset_stored(&self) -> (String, String) {
+        (self.offset_x.to_string(), self.offset_y.to_string())
     }
     /// Box side as a percentage of the GUI width.
     pub fn size_percent(&self) -> f32 {
@@ -281,6 +300,20 @@ mod tests {
         assert_eq!(s.stored(GAME_TIME), "off");
         assert!(s.flag(WAYPOINTS_ON_MAP) && s.flag(DEATH_MARKERS));
         assert_eq!(s.waypoint_distance(), 0);
+        assert_eq!(s.offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn offsets_load_store_and_ignore_junk() {
+        let mut s = Settings::load(|k| match k {
+            "offset_x" => Some(" 23 ".into()),
+            "offset_y" => Some("junk".into()),
+            _ => None,
+        });
+        assert_eq!(s.offset(), (23.0, 0.0));
+        s.set_offset((12.6, -8.2));
+        assert_eq!(s.offset(), (13.0, -8.0));
+        assert_eq!(s.offset_stored(), ("13".into(), "-8".into()));
     }
 
     #[test]

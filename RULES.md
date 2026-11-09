@@ -213,7 +213,7 @@ Settings.java defaults (field lines):
   12-hour mode maps hour 0 to 12 and shows AM/PM by `hour < 12`. Formats: DAY_24H, DAY_12H (with day), ONLY_24H,
   ONLY_12H (Settings.java:198-204).
 - Keys (DioramaClient.java:36-44): new waypoint **B**, waypoint list **U**, zoom in **=**, zoom out **-**; open map **M**
-  (dropped); settings, toggle minimap, enlarge, toggle dimension unbound. Key ids use `key.diorama.*`.
+  (implemented in v3); settings, toggle minimap, enlarge, toggle dimension unbound. Key ids use `key.diorama.*`.
 - Opacity: layer fade 300 ms and hold 3000 ms exist (MinimapHud.java:50-51), dropped.
 
 ## 10. Waypoints
@@ -406,3 +406,37 @@ interval dirty rows, per-column span and top-texel caches, in-place shift, row-w
 - **Not fixed:** the first frame after a join on Pulley (one 4-5 ms frame: the first recentre and image work)
   and recentres while flying (0.6-2.7 ms frames every ~80 blocks, a 3.4 MB shift); a toroidal mosaic would
   remove them.
+
+
+## v3 full map
+
+- API level 18, local fork branch `claude/mod-canvas-screen`. The HUD image remains **512 × 512** texels.
+  The independent fullscreen image is **880 × 880** at **1 texel/block**: the largest square of whole
+  16-texel strips that the existing square mosaic can use beside the HUD. Their total is **1,036,544 texels**
+  (262,144 + 774,400), below **1,048,576**. The remaining 12,032 texels are unused. This gives more area than
+  1024 × 512 without changing the square baker; each image side is below the host's 1024 limit.
+- The fullscreen image is created on opening and dropped on every close, including switching to the waypoint
+  list, changing dimension, and leaving the world. Reopening starts afresh around the player. No world chunks
+  are requested or generated: only `client-world.changes` and `columns` of already loaded chunks are read,
+  within the image's projected extent and the host's 64-chunk query radius. Columns already read remain in the open map
+  if their chunks unload. There is no persisted explored map.
+- One bake scheduler serves the two mosaic instances. The HUD's bake queue, mosaic, source focus and image
+  wait while the fullscreen map bakes; dirty uploads retain the existing 256 KiB/frame cap (below API 18's
+  1 MiB/frame), with the same adaptive work-left budget. The HUD catches up with chunk/resource changes on
+  closing. Slow engines keep a 512 × 512 HUD mosaic, at 1 rather than 2 texels/block.
+- The fullscreen camera uses `MapView`, initially 1 GUI px/block, pan by drag, cursor-anchored wheel zoom
+  from 0.25 to 8 GUI px/block. Its mosaic stays fixed at the opening location; beyond it is unknown grey.
+  Cursor coordinates use the prepared column heights already cached by the mosaic and the dimension's true
+  min/max y. Unknown columns do not invent a height or allow adding a waypoint. Cave/Nether cut height is
+  frozen when the screen opens. Player arrow, named visible waypoints and death markers use the same projection.
+- M opens the map, C centres it, W closes it before opening the existing waypoint list. Right-click uses
+  the same waypoint add/save/name/colour path as B, at the cursor's surface instead of the player's feet.
+  Click a pin, T teleports through the list's existing command path, Del deletes. Shapes are sent only when
+  the view, GUI size, hovered block, player, waypoint revision, selection or uploaded texels change.
+- Placement uses `set-placed` with inward GUI-pixel offsets from the saved corner; exactly (0,0) retains
+  `set-corner` stacking. The editor draws the live HUD shapes on a dim screen with a dashed outline. Dragging
+  is clamped to the GUI; arrows move 1 px, either Shift increases this to 10. R restores the opening corner
+  with offsets (0,0). Esc/Enter saves the nearest corner and rounded offsets through `layout::snap`, except
+  an untouched/reset corner keeps zero offsets so corner stacking is restored.
+- The TOML runner has pointer/scroll/screen-key events but no gameplay-key or settings-selection event.
+  Scenarios therefore open via `/diorama map` and `/diorama move`, the same paths used by M and the button.

@@ -1,0 +1,71 @@
+# /diorama move is the settings button's path (the runner has no select step).
+[player]
+x = 8.5
+y = 65.0
+z = 8.5
+
+[[step]]
+ticks = 1
+frames = 1
+command = "diorama move"
+expect.canvas-screen = { open = true, title = "Move minimap" }
+
+[[step]]
+pointer = { kind = "down", x = 400.0, y = 20.0 }
+
+[[step]]
+pointer = { kind = "drag", x = 203.0, y = 100.0 }
+
+[[step]]
+pointer = { kind = "up", x = 203.0, y = 100.0 }
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas-screen = { open = false }
+expect.canvas = { placed = true, corner = "top-left", x = 180.0, y = 80.0, dx = 180.0, dy = 80.0, images = 1 }
+
+[[step]]
+reload = true
+ticks = 1
+frames = 1
+expect.canvas = { placed = true, corner = "top-left", dx = 180.0, dy = 80.0 }
+command = "diorama move"
+
+[[step]]
+screen-key = { key = "key.keyboard.left.shift", down = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.right.shift", down = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.left.shift", down = false }
+
+[[step]]
+screen-key = { key = "key.keyboard.right", down = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.right.shift", down = false }
+
+[[step]]
+screen-key = { key = "key.keyboard.down", down = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas = { placed = true, corner = "top-right", x = 190.0, y = 81.0, dx = 187.0, dy = 81.0 }
+
+[[step]]
+command = "diorama move"
+
+[[step]]
+screen-key = { key = "key.keyboard.r", down = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas-screen = { open = false }
+expect.canvas = { placed = false, corner = "top-right", images = 1 }
+
+[[step]]
+reload = true
+ticks = 1
+frames = 1
+expect.canvas = { placed = false, corner = "top-right" }

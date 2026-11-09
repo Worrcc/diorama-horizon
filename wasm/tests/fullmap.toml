@@ -1,0 +1,124 @@
+# The runner has no input::poll key injection. /diorama map calls the same
+# opening path as the registered M binding. Screen keys use API 18 events.
+[player]
+x = 8.5
+y = 65.0
+z = 8.5
+
+[[step]]
+blocks = [
+  { x = 8, y = 63, z = 7, state = "minecraft:stone" },
+  { x = 8, y = 63, z = 8, state = "minecraft:stone" },
+  { x = 8, y = 63, z = 9, state = "minecraft:stone" },
+  { x = 9, y = 63, z = 9, state = "minecraft:stone" },
+]
+ticks = 1
+frames = 60
+command = "diorama map"
+expect.canvas-screen = { open = true, title = "Diorama map" }
+
+[[step]]
+frames = 120
+pointer = { kind = "move", x = 213.5, y = 120.0 }
+expect.canvas-screen.texts = ["8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+pointer = { kind = "down", x = 213.5, y = 120.0, button = 1 }
+
+[[step]]
+command = "dwp list"
+expect.feedback = "1 waypoint"
+expect.chat = ["1. Waypoint 1  2 m"]
+
+[[step]]
+# The pin is projected using its surface height, close to the added column.
+pointer = { kind = "down", x = 213.5, y = 121.0 }
+expect.canvas-screen.texts = ["Waypoint 1", "8 63 8 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close", "Teleport (T) / Delete (Del)"]
+
+[[step]]
+screen-key = { key = "key.keyboard.t", down = true }
+expect.chat = ["Teleporting to Waypoint 1"]
+
+[[step]]
+screen-key = { key = "key.keyboard.delete", down = true }
+
+[[step]]
+command = "dwp list"
+expect.feedback = "No waypoints in this world: /dwp add [name] or B"
+
+[[step]]
+pointer = { kind = "down", x = 213.5, y = 120.0 }
+
+[[step]]
+pointer = { kind = "drag", x = 253.5, y = 140.0 }
+expect.canvas-screen.texts = ["8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+pointer = { kind = "up", x = 253.5, y = 140.0 }
+
+[[step]]
+pointer = { kind = "move", x = 213.5, y = 120.0 }
+expect.canvas-screen.texts = ["Unknown area", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+screen-key = { key = "key.keyboard.c", down = true }
+expect.canvas-screen.texts = ["8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+# At scale 1 this is the unknown x=9 column.
+pointer = { kind = "move", x = 214.5, y = 120.0 }
+expect.canvas-screen.texts = ["Unknown area", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+# Wheel anchored on the centre keeps the same column under the pointer.
+scroll = { x = 213.5, y = 120.0, steps = 4.0 }
+expect.canvas-screen.texts = ["8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+# After zoom, the same GUI point lies in known x=8: verifies scale changed.
+pointer = { kind = "move", x = 214.5, y = 120.0 }
+expect.canvas-screen.texts = ["8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas-screen = { open = false }
+
+[[step]]
+frames = 2
+expect.canvas = { images = 1 }
+command = "diorama map"
+expect.canvas-screen = { open = true }
+
+[[step]]
+# Reopening allocates another 880² image: would exceed the texel budget
+# unless the previous map image was dropped.
+screen-key = { key = "key.keyboard.w", down = true }
+expect.canvas-screen = { open = false }
+
+[[step]]
+command = "diorama map"
+expect.canvas-screen = { open = true }
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas-screen = { open = false }
+
+# Hidden manual pins stay absent while death markers remain visible.
+[[step]]
+command = "dwp add Secret"
+
+[[step]]
+command = "dwp hide 1"
+
+[[step]]
+player = { health = 0.0 }
+ticks = 1
+command = "diorama map"
+
+[[step]]
+frames = 120
+expect.canvas-screen.texts = ["Death 06:00", "8 63 7 Plains", "N", "Drag pan - Wheel zoom - C centre", "Right-click add waypoint - W waypoints - Esc close"]
+
+[[step]]
+screen-key = { key = "key.keyboard.escape", down = true }
+expect.canvas-screen = { open = false }

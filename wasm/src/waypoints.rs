@@ -36,6 +36,7 @@ const TELEPORT: u32 = 101;
 const COLOUR: u32 = 102;
 const HIDE: u32 = 103;
 const DELETE: u32 = 104;
+const MAP: u32 = 105;
 
 /// The waypoint side of the mod's state.
 pub struct Waypoints {
@@ -182,7 +183,7 @@ impl Diorama {
     }
 
     /// Saves the set and redraws (the box and an open list).
-    fn wp_changed(&mut self) {
+    pub(crate) fn wp_changed(&mut self) {
         self.rev = self.rev.wrapping_add(1);
         if let Some(key) = &self.wp.key {
             if let Err(e) = storage::set(key, wp::write_file(&self.wp.set.list).as_bytes()) {
@@ -205,11 +206,20 @@ impl Diorama {
 
     /// A waypoint where the player stands (key B, `/dwp add`).
     pub fn add_here(&mut self, name: Option<&str>) -> Result<String, String> {
-        self.need_world()?;
         let (p, at) = here().ok_or("not in a world")?;
+        self.add_at(name, at, &p.dimension)
+    }
+
+    pub(crate) fn add_at(
+        &mut self,
+        name: Option<&str>,
+        at: (i32, i32, i32),
+        dimension: &str,
+    ) -> Result<String, String> {
+        self.need_world()?;
         self.stir();
         let w = &mut self.wp;
-        let i = w.set.add(name, at, &p.dimension, &mut w.rng, now_ms())?;
+        let i = w.set.add(name, at, dimension, &mut w.rng, now_ms())?;
         self.wp_changed();
         let w = &self.wp.set.list[i];
         let mut text = format!(
@@ -228,7 +238,7 @@ impl Diorama {
     }
 
     /// The one command the mod runs (see the module's notes).
-    fn teleport(&mut self, i: usize) -> Result<String, String> {
+    pub(crate) fn teleport(&mut self, i: usize) -> Result<String, String> {
         let (p, _) = here().ok_or("not in a world")?;
         let w = &self.wp.set.list[i];
         let line = wp::teleport_line(w, &p.dimension)
@@ -237,7 +247,7 @@ impl Diorama {
         Ok(format!("Teleporting to {}", w.name))
     }
 
-    fn removed(&mut self, i: usize) {
+    pub(crate) fn removed(&mut self, i: usize) {
         self.wp.set.list.remove(i);
         self.wp.selected = match self.wp.selected {
             Some(s) if s == i => None,
@@ -368,6 +378,8 @@ impl Diorama {
     /// The list screen (key U): every waypoint of the world, and buttons
     /// for the one picked. Naming is `/dwp rename` (no text field).
     pub fn show_list(&mut self) {
+        self.close_fullmap();
+        self.finish_move();
         self.wp.open = true;
         let p = game::get_player();
         let at = p.as_ref().map(|p| (p.dimension.as_str(), p.x, p.y, p.z));
@@ -413,6 +425,10 @@ impl Diorama {
                 })),
             }
         }
+        widgets.push(Widget::Button(ButtonWidget {
+            id: MAP,
+            label: "Open fullscreen map (M)".into(),
+        }));
         ui::open_screen(&Screen {
             title: "Waypoints".into(),
             widgets,
@@ -421,6 +437,12 @@ impl Diorama {
 
     /// A pick on the list screen; false when it was not the list's.
     pub fn list_select(&mut self, id: u32, row: u32) -> bool {
+        if id == MAP && self.wp.open {
+            self.list_closed();
+            ui::close_screen();
+            self.open_fullmap();
+            return true;
+        }
         if !(LIST..=DELETE).contains(&id) || !self.wp.open {
             return false;
         }

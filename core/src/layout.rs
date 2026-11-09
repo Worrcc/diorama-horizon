@@ -9,6 +9,47 @@ pub enum Corner {
     BottomRight,
 }
 
+/// A rectangle `(x, y, w, h)` in GUI pixels or image texels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Place a box inward from an anchor corner, keeping it on screen.
+pub fn place(anchor: Corner, offset: (f32, f32), size: (f32, f32), gui: (f32, f32)) -> Rect {
+    let max_x = (gui.0 - size.0).max(0.0);
+    let max_y = (gui.1 - size.1).max(0.0);
+    let (x, y) = match anchor {
+        Corner::TopLeft => (offset.0, offset.1),
+        Corner::TopRight => (gui.0 - size.0 - offset.0, offset.1),
+        Corner::BottomLeft => (offset.0, gui.1 - size.1 - offset.1),
+        Corner::BottomRight => (gui.0 - size.0 - offset.0, gui.1 - size.1 - offset.1),
+    };
+    Rect { x: x.clamp(0.0, max_x), y: y.clamp(0.0, max_y), w: size.0, h: size.1 }
+}
+
+/// Anchor a box to the corner nearest its centre and return its inward offset.
+pub fn snap(top_left: (f32, f32), size: (f32, f32), gui: (f32, f32)) -> (Corner, (f32, f32)) {
+    let x = top_left.0.clamp(0.0, (gui.0 - size.0).max(0.0));
+    let y = top_left.1.clamp(0.0, (gui.1 - size.1).max(0.0));
+    let cx = x + size.0 / 2.0;
+    let cy = y + size.1 / 2.0;
+    let left = cx <= gui.0 / 2.0;
+    let top = cy <= gui.1 / 2.0;
+    let corner = match (top, left) {
+        (true, true) => Corner::TopLeft,
+        (true, false) => Corner::TopRight,
+        (false, true) => Corner::BottomLeft,
+        (false, false) => Corner::BottomRight,
+    };
+    let ox = if left { x } else { (gui.0 - size.0 - x).max(0.0) };
+    let oy = if top { y } else { (gui.1 - size.1 - y).max(0.0) };
+    (corner, (ox, oy))
+}
+
 /// Info line height in GUI pixels (MinimapHud.java:174).
 pub const LINE: f32 = 10.0;
 
@@ -136,5 +177,23 @@ mod tests {
         assert_eq!(a[0], b[0]);
         assert_eq!(a[2], b[1]);
         assert!((a[1].0 + b[2].0).abs() < 1e-5 && (a[1].1 - b[2].1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn placement_and_snap_round_trip_all_corners() {
+        for c in [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight] {
+            let r = place(c, (13.0, 17.0), (80.0, 60.0), (500.0, 400.0));
+            let (corner, offset) = snap((r.x, r.y), (r.w, r.h), (500.0, 400.0));
+            assert_eq!(corner, c);
+            assert_eq!(place(corner, offset, (r.w, r.h), (500.0, 400.0)), r);
+        }
+    }
+
+    #[test]
+    fn placement_clamps_and_oversize_pins_to_zero() {
+        let r = place(Corner::BottomRight, (900.0, 900.0), (80.0, 60.0), (500.0, 400.0));
+        assert_eq!((r.x, r.y), (0.0, 0.0));
+        let r = place(Corner::TopLeft, (0.0, 0.0), (600.0, 500.0), (500.0, 400.0));
+        assert_eq!((r.x, r.y), (0.0, 0.0));
     }
 }

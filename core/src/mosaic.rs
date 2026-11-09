@@ -366,6 +366,14 @@ impl Mosaic {
     pub fn height_at(&self, i: u32, j: u32) -> f32 {
         self.height[(j * self.side + i) as usize]
     }
+    /// Surface height already prepared by the baker; never reads world data.
+    pub fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
+        self.chunks
+            .get(&(x >> 4, z >> 4))?
+            .chunk
+            .top((x & 15) as usize, (z & 15) as usize)
+    }
+
     /// Chunks in the cache.
     pub fn chunks(&self) -> usize {
         self.chunks.len()

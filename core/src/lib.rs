@@ -4,6 +4,7 @@
 pub mod bake;
 pub mod budget;
 pub mod cave;
+pub mod fullmap;
 pub mod json;
 pub mod layout;
 pub mod looks;
