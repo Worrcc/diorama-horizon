@@ -1,7 +1,7 @@
 id = "diorama"
 name = "Diorama"
-version = "0.0.1"
-description = "Unofficial port of the Diorama minimap (MIT, Dara Adedeji). The angled map of the loaded chunks at the top right, coloured from your resource packs."
+version = "0.3.0"
+description = "Unofficial port of the Diorama minimap (MIT, Dara Adedeji). An angled minimap of the loaded chunks, coloured from your resource packs, that you can move anywhere on screen, a fullscreen map (M), caves and the Nether, zoom and waypoints."
 authors = ["Worrcc", "Dara Adedeji (Diorama)"]
 api = "0.1"
 side = "client"
