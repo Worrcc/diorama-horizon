@@ -192,8 +192,12 @@ impl Settings {
                 }
             }
         }
-        s.offset_x = get("offset_x").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
-        s.offset_y = get("offset_y").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        s.offset_x = get("offset_x")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        s.offset_y = get("offset_y")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
         s
     }
     /// The next value of setting `i`, wrapping.
@@ -367,7 +371,7 @@ mod tests {
         assert_eq!(s.zoom(), 1.0);
         assert_eq!(zoom_step(1.4), 2);
         // Every step has a stored value, so the keys can reach all of them.
-        for step in 0..ZOOM_STEPS.len() {
+        for (step, _) in ZOOM_STEPS.iter().enumerate() {
             s.set_zoom_step(step);
             assert_eq!(s.zoom(), ZOOM_STEPS[step]);
         }

@@ -18,6 +18,89 @@ pub struct Rect {
     pub h: f32,
 }
 
+/// Fullscreen touch controls in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchButton {
+    Centre,
+    Waypoints,
+    AddWaypoint,
+    ZoomIn,
+    ZoomOut,
+    Teleport,
+    Delete,
+    Done,
+    Reset,
+}
+
+/// Tappable controls laid out as one bottom row, with a small screen-safe gap.
+/// Short controls share the space evenly; the longer labels get more room.
+pub fn touch_buttons(gui: (f32, f32), buttons: &[TouchButton]) -> Vec<(TouchButton, Rect)> {
+    let gap = 4.0;
+    let pad = 4.0;
+    let natural: Vec<f32> = buttons
+        .iter()
+        .map(|b| match b {
+            TouchButton::Centre => 48.0,
+            TouchButton::Waypoints => 62.0,
+            TouchButton::AddWaypoint => 82.0,
+            TouchButton::ZoomIn | TouchButton::ZoomOut => 28.0,
+            TouchButton::Teleport => 66.0,
+            TouchButton::Delete => 48.0,
+            TouchButton::Done | TouchButton::Reset => 64.0,
+        })
+        .collect();
+    let natural_width: f32 =
+        natural.iter().sum::<f32>() + gap * buttons.len().saturating_sub(1) as f32;
+    let available = (gui.0 - pad * 2.0).max(0.0);
+    let scale = if natural_width > available && natural_width > 0.0 {
+        ((available - gap * buttons.len().saturating_sub(1) as f32).max(0.0)
+            / natural.iter().sum::<f32>().max(1.0))
+        .min(1.0)
+    } else {
+        1.0
+    };
+    let widths: Vec<f32> = natural.into_iter().map(|w| w * scale).collect();
+    let total = widths.iter().sum::<f32>() + gap * buttons.len().saturating_sub(1) as f32;
+    let mut x = ((gui.0 - total) / 2.0).max(0.0);
+    let y = (gui.1 - 28.0).max(0.0);
+    buttons
+        .iter()
+        .copied()
+        .zip(widths)
+        .map(|(button, w)| {
+            let rect = Rect {
+                x,
+                y,
+                w,
+                h: 20.0f32.min(gui.1),
+            };
+            x += w + gap;
+            (button, rect)
+        })
+        .collect()
+}
+
+pub fn hit_button(buttons: &[(TouchButton, Rect)], x: f32, y: f32) -> Option<TouchButton> {
+    buttons.iter().find_map(|(button, r)| {
+        (x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h).then_some(*button)
+    })
+}
+
+/// Touch devices reserve the top-right for host controls. Use the left corner
+/// only when no placement has ever been saved; explicit settings always win.
+pub fn default_place(
+    touch: bool,
+    stored: bool,
+    corner: Corner,
+    offset: (f32, f32),
+) -> (Corner, (f32, f32)) {
+    if touch && !stored {
+        (Corner::TopLeft, (28.0, 4.0))
+    } else {
+        (corner, offset)
+    }
+}
+
 /// Place a box inward from an anchor corner, keeping it on screen.
 pub fn place(anchor: Corner, offset: (f32, f32), size: (f32, f32), gui: (f32, f32)) -> Rect {
     let max_x = (gui.0 - size.0).max(0.0);
@@ -28,7 +111,12 @@ pub fn place(anchor: Corner, offset: (f32, f32), size: (f32, f32), gui: (f32, f3
         Corner::BottomLeft => (offset.0, gui.1 - size.1 - offset.1),
         Corner::BottomRight => (gui.0 - size.0 - offset.0, gui.1 - size.1 - offset.1),
     };
-    Rect { x: x.clamp(0.0, max_x), y: y.clamp(0.0, max_y), w: size.0, h: size.1 }
+    Rect {
+        x: x.clamp(0.0, max_x),
+        y: y.clamp(0.0, max_y),
+        w: size.0,
+        h: size.1,
+    }
 }
 
 /// Anchor a box to the corner nearest its centre and return its inward offset.
@@ -45,8 +133,16 @@ pub fn snap(top_left: (f32, f32), size: (f32, f32), gui: (f32, f32)) -> (Corner,
         (false, true) => Corner::BottomLeft,
         (false, false) => Corner::BottomRight,
     };
-    let ox = if left { x } else { (gui.0 - size.0 - x).max(0.0) };
-    let oy = if top { y } else { (gui.1 - size.1 - y).max(0.0) };
+    let ox = if left {
+        x
+    } else {
+        (gui.0 - size.0 - x).max(0.0)
+    };
+    let oy = if top {
+        y
+    } else {
+        (gui.1 - size.1 - y).max(0.0)
+    };
     (corner, (ox, oy))
 }
 
@@ -181,7 +277,12 @@ mod tests {
 
     #[test]
     fn placement_and_snap_round_trip_all_corners() {
-        for c in [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight] {
+        for c in [
+            Corner::TopLeft,
+            Corner::TopRight,
+            Corner::BottomLeft,
+            Corner::BottomRight,
+        ] {
             let r = place(c, (13.0, 17.0), (80.0, 60.0), (500.0, 400.0));
             let (corner, offset) = snap((r.x, r.y), (r.w, r.h), (500.0, 400.0));
             assert_eq!(corner, c);
@@ -191,9 +292,59 @@ mod tests {
 
     #[test]
     fn placement_clamps_and_oversize_pins_to_zero() {
-        let r = place(Corner::BottomRight, (900.0, 900.0), (80.0, 60.0), (500.0, 400.0));
+        let r = place(
+            Corner::BottomRight,
+            (900.0, 900.0),
+            (80.0, 60.0),
+            (500.0, 400.0),
+        );
         assert_eq!((r.x, r.y), (0.0, 0.0));
         let r = place(Corner::TopLeft, (0.0, 0.0), (600.0, 500.0), (500.0, 400.0));
         assert_eq!((r.x, r.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn touch_button_rows_fit_common_gui_sizes_and_hit_test() {
+        use TouchButton::*;
+        let row = [Centre, Waypoints, AddWaypoint, ZoomIn, ZoomOut];
+        for gui in [(1280.0, 720.0), (640.0, 360.0), (284.0, 160.0)] {
+            let buttons = touch_buttons(gui, &row);
+            assert_eq!(buttons.len(), row.len());
+            assert!(buttons
+                .iter()
+                .all(|(_, r)| r.x >= 0.0 && r.x + r.w <= gui.0 + 0.01));
+            assert!(buttons
+                .iter()
+                .all(|(_, r)| r.y >= 0.0 && r.y + r.h <= gui.1 + 0.01));
+            for (button, r) in &buttons {
+                assert_eq!(
+                    hit_button(&buttons, r.x + r.w / 2.0, r.y + r.h / 2.0),
+                    Some(*button)
+                );
+            }
+        }
+        let move_row = touch_buttons((284.0, 160.0), &[Done, Reset]);
+        assert_eq!(move_row[0].1.w, 64.0);
+        assert_eq!(hit_button(&move_row, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn touch_default_placement_only_applies_without_saved_placement() {
+        assert_eq!(
+            default_place(true, false, Corner::TopRight, (0.0, 0.0)),
+            (Corner::TopLeft, (28.0, 4.0))
+        );
+        assert_eq!(
+            default_place(true, true, Corner::TopRight, (0.0, 0.0)),
+            (Corner::TopRight, (0.0, 0.0))
+        );
+        assert_eq!(
+            default_place(true, true, Corner::BottomLeft, (11.0, 9.0)),
+            (Corner::BottomLeft, (11.0, 9.0))
+        );
+        assert_eq!(
+            default_place(false, false, Corner::TopRight, (0.0, 0.0)),
+            (Corner::TopRight, (0.0, 0.0))
+        );
     }
 }

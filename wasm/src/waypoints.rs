@@ -37,6 +37,7 @@ const COLOUR: u32 = 102;
 const HIDE: u32 = 103;
 const DELETE: u32 = 104;
 const MAP: u32 = 105;
+const ADD: u32 = 106;
 
 /// The waypoint side of the mod's state.
 pub struct Waypoints {
@@ -425,6 +426,12 @@ impl Diorama {
                 })),
             }
         }
+        if self.touch {
+            widgets.push(Widget::Button(ButtonWidget {
+                id: ADD,
+                label: "Add waypoint here".into(),
+            }));
+        }
         widgets.push(Widget::Button(ButtonWidget {
             id: MAP,
             label: "Open fullscreen map (M)".into(),
@@ -437,6 +444,13 @@ impl Diorama {
 
     /// A pick on the list screen; false when it was not the list's.
     pub fn list_select(&mut self, id: u32, row: u32) -> bool {
+        if id == ADD && self.wp.open {
+            match self.add_here(None) {
+                Ok(t) | Err(t) => chat::show(&t),
+            }
+            self.show_list();
+            return true;
+        }
         if id == MAP && self.wp.open {
             self.list_closed();
             ui::close_screen();

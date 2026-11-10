@@ -14,4 +14,4 @@ diorama-core = { path = "../core" }
 # API level 18 from the local claude/mod-canvas-screen worktree.
 # re-pin to the pushed claude/mod-canvas-screen commit
 # horizon-mod-sdk = { git = "https://github.com/Worrcc/Horizon-iOS-worc", rev = "5082b61b08c8dcf628e18accfe2fbe667bfee57d" }
-horizon-mod-sdk = { path = "/home/worc/Projects/iaf-swarm/canvas-screen/crates/horizon-mod-sdk" }
+horizon-mod-sdk = { path = "/home/worc/Projects/iaf-swarm/liteminer-api/crates/horizon-mod-sdk" }

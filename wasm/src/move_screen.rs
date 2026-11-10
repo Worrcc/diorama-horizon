@@ -5,7 +5,8 @@ use horizon_mod_sdk::PointerKind;
 pub const MOVE: u32 = 200;
 pub const OFFSET_X: u32 = 201;
 pub const OFFSET_Y: u32 = 202;
-const HINT: &str = "Drag to move - arrows nudge (Shift x10) - R reset - Esc to save";
+const DESKTOP_HINT: &str = "Drag to move - arrows nudge (Shift x10) - R reset - Esc to save";
+const TOUCH_HINT: &str = "Drag the minimap, then tap Done";
 
 pub struct MoveScreen {
     at: (f32, f32),
@@ -23,9 +24,14 @@ impl Diorama {
         ui::close_screen();
         self.shown = None;
         self.draw(&p);
-        let offset = self.settings.offset();
-        let r = layout::place(
+        let (corner, offset) = layout::default_place(
+            self.touch,
+            self.placement_stored,
             self.settings.corner(),
+            self.settings.offset(),
+        );
+        let r = layout::place(
+            corner,
             offset,
             self.box_size,
             render::gui_size(),
@@ -35,7 +41,7 @@ impl Diorama {
             drag: None,
             shift: [false; 2],
             reset: offset == (0.0, 0.0),
-            corner: self.settings.corner(),
+            corner,
         });
         canvas::open_canvas_screen("Move minimap", &[]);
         self.draw_move();
@@ -56,6 +62,7 @@ impl Diorama {
         };
         self.settings.set_stored(settings::CORNER, key);
         self.settings.set_offset(offset);
+        self.placement_stored = true;
         self.save(settings::CORNER);
         let (x, y) = self.settings.offset_stored();
         let _ = storage::set("offset_x", x.as_bytes());
@@ -77,6 +84,27 @@ impl Diorama {
             return;
         }
         let Some(m) = &mut self.moving else { return };
+        if kind == PointerKind::Down && self.touch {
+            let buttons = layout::touch_buttons(
+                render::gui_size(),
+                &[layout::TouchButton::Done, layout::TouchButton::Reset],
+            );
+            match layout::hit_button(&buttons, x, y) {
+                Some(layout::TouchButton::Done) => {
+                    self.finish_move();
+                    return;
+                }
+                Some(layout::TouchButton::Reset) => {
+                    let r = layout::place(m.corner, (0.0, 0.0), self.box_size, render::gui_size());
+                    m.at = (r.x, r.y);
+                    m.reset = true;
+                    m.drag = None;
+                    self.draw_move();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match kind {
             PointerKind::Down
                 if x >= m.at.0
@@ -199,16 +227,85 @@ impl Diorama {
                 d += 6.0;
             }
         }
+        let touch = self.touch;
         out.push(Shape::Text(TextShape {
-            text: HINT.into(),
+            text: if touch { TOUCH_HINT } else { DESKTOP_HINT }.into(),
             at: Point {
                 x: gui.0 / 2.0,
-                y: gui.1 - 12.0,
+                // Above the Done and Reset buttons on a touch screen.
+                y: gui.1 - if touch { 44.0 } else { 12.0 },
             },
             color: 0xFFFF_FFFF,
             centered: true,
             shadow: true,
         }));
+        if touch {
+            let buttons = layout::touch_buttons(
+                gui,
+                &[layout::TouchButton::Done, layout::TouchButton::Reset],
+            );
+            for (button, r) in buttons {
+                out.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: r.x,
+                        y: r.y,
+                        w: r.w,
+                        h: r.h,
+                    },
+                    color: 0xB000_0000,
+                }));
+                out.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: r.x,
+                        y: r.y,
+                        w: r.w,
+                        h: 1.0,
+                    },
+                    color: 0xCCFF_FFFF,
+                }));
+                out.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: r.x,
+                        y: r.y + r.h - 1.0,
+                        w: r.w,
+                        h: 1.0,
+                    },
+                    color: 0xCCFF_FFFF,
+                }));
+                out.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: r.x,
+                        y: r.y,
+                        w: 1.0,
+                        h: r.h,
+                    },
+                    color: 0xCCFF_FFFF,
+                }));
+                out.push(Shape::Fill(FillShape {
+                    rect: Rect {
+                        x: r.x + r.w - 1.0,
+                        y: r.y,
+                        w: 1.0,
+                        h: r.h,
+                    },
+                    color: 0xCCFF_FFFF,
+                }));
+                out.push(Shape::Text(TextShape {
+                    text: match button {
+                        layout::TouchButton::Done => "Done",
+                        _ => "Reset",
+                    }
+                    .into(),
+                    at: Point {
+                        x: r.x + r.w / 2.0,
+                        y: r.y + 6.0,
+                    },
+                    color: 0xFFFF_FFFF,
+                    centered: true,
+                    shadow: true,
+                }));
+            }
+        }
         canvas::set_canvas_screen(&out);
     }
 }

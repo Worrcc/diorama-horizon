@@ -242,6 +242,10 @@ struct Diorama {
     wp: waypoints::Waypoints,
     fullmap: Option<fullmap::FullMap>,
     moving: Option<move_screen::MoveScreen>,
+    /// The player uses the touch screen. `input::touch_active` is only true while playing, so it
+    /// is remembered for the mod's screens and the minimap's default place.
+    touch: bool,
+    placement_stored: bool,
     box_shapes: Vec<Shape>,
     box_size: (f32, f32),
 }
@@ -651,7 +655,13 @@ impl Diorama {
         if !self.info.is_empty() {
             height += 2.0;
         }
-        let corner = match self.settings.corner() {
+        let (anchor, offset) = layout::default_place(
+            self.touch,
+            self.placement_stored,
+            self.settings.corner(),
+            self.settings.offset(),
+        );
+        let corner = match anchor {
             MapCorner::TopRight => Corner::TopRight,
             MapCorner::TopLeft => Corner::TopLeft,
             MapCorner::BottomLeft => Corner::BottomLeft,
@@ -660,7 +670,6 @@ impl Diorama {
         self.box_size = (wide, height);
         self.box_shapes = shapes;
         let shapes = &self.box_shapes;
-        let offset = self.settings.offset();
         if offset == (0.0, 0.0) {
             canvas::set_corner(corner, wide, height, shapes);
         } else {
@@ -1080,6 +1089,9 @@ impl Mod for Diorama {
             },
         ));
         let style = style::DEFAULT;
+        let placement_stored = storage::get(settings::SETTINGS[settings::CORNER].key).is_some()
+            || storage::get("offset_x").is_some()
+            || storage::get("offset_y").is_some();
         let settings = Settings::load(|k| {
             storage::get(k)
                 .and_then(|v| String::from_utf8(v).ok())
@@ -1100,6 +1112,10 @@ impl Mod for Diorama {
                 horizon_mod_sdk::warn(&format!("register-key {name}: {e}"));
             }
         }
+        // On a touch screen, a tap on the minimap opens the fullscreen map (API level 21).
+        if let Err(e) = canvas::set_box_key(Some("fullmap")) {
+            horizon_mod_sdk::warn(&format!("set-box-key: {e}"));
+        }
         let mut style = style;
         if settings.flat_style() {
             style = style::Style {
@@ -1108,6 +1124,7 @@ impl Mod for Diorama {
             };
         }
         let state = Diorama {
+            touch: false,
             mosaic: Mosaic::new(Projection::new(style.pitch_degrees), SIDE),
             painter: Painter::new(looks, style),
             blocks: table.blocks,
@@ -1146,6 +1163,7 @@ impl Mod for Diorama {
             wp: waypoints::Waypoints::new(),
             fullmap: None,
             moving: None,
+            placement_stored,
             box_shapes: Vec::new(),
             box_size: (48.0, 48.0),
         };
@@ -1237,6 +1255,7 @@ impl Mod for Diorama {
     }
 
     fn tick(&mut self, tick: u64) {
+        self.touch |= input::touch_active();
         for event in input::poll() {
             if let input::Event::KeyDown(name) = event {
                 self.key(&name);

@@ -55,6 +55,28 @@ struct Drawn {
 }
 
 impl FullMap {
+    fn touch_controls(&self) -> Vec<(layout::TouchButton, layout::Rect)> {
+        layout::touch_buttons(
+            render::gui_size(),
+            &[
+                layout::TouchButton::Centre,
+                layout::TouchButton::Waypoints,
+                layout::TouchButton::AddWaypoint,
+                layout::TouchButton::ZoomIn,
+                layout::TouchButton::ZoomOut,
+            ],
+        )
+    }
+    fn touch_actions(&self) -> Vec<(layout::TouchButton, layout::Rect)> {
+        let mut buttons = layout::touch_buttons(
+            render::gui_size(),
+            &[layout::TouchButton::Teleport, layout::TouchButton::Delete],
+        );
+        for (_, r) in &mut buttons {
+            r.y = 34.0;
+        }
+        buttons
+    }
     fn block(&self, bottom_bar: f32) -> Option<(i32, i32, i32)> {
         let gui = render::gui_size();
         if self.cursor.1 < 20.0 || self.cursor.1 >= gui.1 - bottom_bar {
@@ -220,8 +242,13 @@ impl Diorama {
     fn render_fullmap(&mut self, p: &game::Player, force: bool) {
         let Some(f) = &self.fullmap else { return };
         let gui = render::gui_size();
+        let touch = self.touch;
         let legend = legend_lines(gui.0);
-        let bottom_bar = 10.0 + 10.0 * legend.len() as f32;
+        let bottom_bar = if touch {
+            28.0
+        } else {
+            10.0 + 10.0 * legend.len() as f32
+        };
         let block = f.block(bottom_bar);
         let key = Drawn {
             view: f.view,
@@ -340,24 +367,42 @@ impl Diorama {
             true,
             0xFFFF_6B6B,
         ));
-        for (i, line) in legend.iter().enumerate() {
-            out.push(text(
-                (*line).into(),
-                gui.0 / 2.0,
-                gui.1 - bottom_bar + 8.0 + i as f32 * 10.0,
-                true,
-                0xFFFF_FFFF,
-            ));
+        if touch {
+            let controls = f.touch_controls();
+            for (button, r) in &controls {
+                draw_touch_button(&mut out, *button, *r);
+            }
+            // Visible target for Add waypoint: this crosshair marks the map-view centre.
+            let (cx, cy) = (gui.0 / 2.0, gui.1 / 2.0);
+            out.push(fill(cx - 5.0, cy, 11.0, 1.0, 0xDDFF_FFFF));
+            out.push(fill(cx, cy - 5.0, 1.0, 11.0, 0xDDFF_FFFF));
+        } else {
+            for (i, line) in legend.iter().enumerate() {
+                out.push(text(
+                    (*line).into(),
+                    gui.0 / 2.0,
+                    gui.1 - bottom_bar + 8.0 + i as f32 * 10.0,
+                    true,
+                    0xFFFF_FFFF,
+                ));
+            }
         }
         if f.selected.is_some() {
-            out.push(fill(0.0, 20.0, gui.0, 12.0, 0xEF10_1418));
-            out.push(text(
-                "Teleport (T) / Delete (Del)".into(),
-                gui.0 / 2.0,
-                22.0,
-                true,
-                0xFFFF_FFFF,
-            ));
+            if touch {
+                out.push(fill(0.0, 32.0, gui.0, 26.0, 0xEF10_1418));
+                for (button, r) in f.touch_actions() {
+                    draw_touch_button(&mut out, button, r);
+                }
+            } else {
+                out.push(fill(0.0, 20.0, gui.0, 12.0, 0xEF10_1418));
+                out.push(text(
+                    "Teleport (T) / Delete (Del)".into(),
+                    gui.0 / 2.0,
+                    22.0,
+                    true,
+                    0xFFFF_FFFF,
+                ));
+            }
         }
         canvas::set_canvas_screen(&out);
         if let Some(f) = &mut self.fullmap {
@@ -371,6 +416,89 @@ impl Diorama {
         };
         f.cursor = (x, y);
         let bottom_bar = 10.0 + 10.0 * legend_lines(render::gui_size().0).len() as f32;
+        if kind == PointerKind::Down && button == 0 && self.touch {
+            let gui = render::gui_size();
+            if f.selected.is_some() {
+                let action_buttons = f.touch_actions();
+                if let Some(action) = layout::hit_button(&action_buttons, x, y) {
+                    let selected = f.selected.as_ref();
+                    let index = self
+                        .wp
+                        .set
+                        .list
+                        .iter()
+                        .position(|w| Some(&w.id) == selected);
+                    match (action, index) {
+                        (layout::TouchButton::Teleport, Some(i)) => match self.teleport(i) {
+                            Ok(t) | Err(t) => chat::show(&t),
+                        },
+                        (layout::TouchButton::Delete, Some(i)) => {
+                            self.removed(i);
+                            self.wp_changed();
+                            f.selected = None;
+                        }
+                        _ => {}
+                    }
+                    self.fullmap = Some(f);
+                    if let Some(p) = game::get_player() {
+                        self.render_fullmap(&p, false);
+                    }
+                    return;
+                }
+            }
+            let controls = f.touch_controls();
+            if let Some(action) = layout::hit_button(&controls, x, y) {
+                match action {
+                    layout::TouchButton::Centre => {
+                        if let Some(p) = game::get_player() {
+                            let proj = f.mosaic.projection();
+                            f.view.centre_on(proj.u(p.x), proj.v(p.y, p.z));
+                        }
+                    }
+                    layout::TouchButton::Waypoints => {
+                        self.fullmap = Some(f);
+                        self.show_list();
+                        return;
+                    }
+                    layout::TouchButton::AddWaypoint => {
+                        let centre = (gui.0 / 2.0, gui.1 / 2.0);
+                        let at = f.view.block_under(centre, gui, f.y_range, |wx, wz| {
+                            f.mosaic.surface_y(wx, wz)
+                        });
+                        if let Some(at) = at {
+                            match self.add_at(None, at, &f.dimension) {
+                                Ok(t) | Err(t) => chat::show(&t),
+                            }
+                        } else {
+                            chat::show("No loaded surface at the map centre");
+                        }
+                    }
+                    layout::TouchButton::ZoomIn | layout::TouchButton::ZoomOut => {
+                        let centre = (gui.0 / 2.0, gui.1 / 2.0);
+                        f.view.zoom_at(
+                            if action == layout::TouchButton::ZoomIn {
+                                1.0
+                            } else {
+                                -1.0
+                            },
+                            centre,
+                            gui,
+                        );
+                    }
+                    _ => {}
+                }
+                self.fullmap = Some(f);
+                if let Some(p) = game::get_player() {
+                    self.render_fullmap(&p, false);
+                }
+                return;
+            }
+        }
+        let bottom_bar = if self.touch {
+            28.0
+        } else {
+            bottom_bar
+        };
         match kind {
             PointerKind::Down if button == 1 => {
                 if let Some(at) = f.block(bottom_bar) {
@@ -458,4 +586,44 @@ impl Diorama {
             self.render_fullmap(&p, false);
         }
     }
+}
+
+fn draw_touch_button(out: &mut Vec<Shape>, button: layout::TouchButton, r: layout::Rect) {
+    let rect = |x, y, w, h| Rect { x, y, w, h };
+    out.push(Shape::Fill(FillShape {
+        rect: rect(r.x, r.y, r.w, r.h),
+        color: 0xB000_0000,
+    }));
+    for edge in [
+        rect(r.x, r.y, r.w, 1.0),
+        rect(r.x, r.y + r.h - 1.0, r.w, 1.0),
+        rect(r.x, r.y, 1.0, r.h),
+        rect(r.x + r.w - 1.0, r.y, 1.0, r.h),
+    ] {
+        out.push(Shape::Fill(FillShape {
+            rect: edge,
+            color: 0xCCFF_FFFF,
+        }));
+    }
+    let label = match button {
+        layout::TouchButton::Centre => "Centre",
+        layout::TouchButton::Waypoints => "Waypoints",
+        layout::TouchButton::AddWaypoint => "Add waypoint",
+        layout::TouchButton::ZoomIn => "+",
+        layout::TouchButton::ZoomOut => "−",
+        layout::TouchButton::Teleport => "Teleport",
+        layout::TouchButton::Delete => "Delete",
+        layout::TouchButton::Done => "Done",
+        layout::TouchButton::Reset => "Reset",
+    };
+    out.push(Shape::Text(TextShape {
+        text: label.into(),
+        at: Point {
+            x: r.x + r.w / 2.0,
+            y: r.y + 6.0,
+        },
+        color: 0xFFFF_FFFF,
+        centered: true,
+        shadow: true,
+    }));
 }
