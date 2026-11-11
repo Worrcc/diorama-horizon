@@ -27,6 +27,7 @@ pub enum TouchButton {
     ZoomIn,
     ZoomOut,
     Teleport,
+    Rename,
     Delete,
     Done,
     Reset,
@@ -45,6 +46,7 @@ pub fn touch_buttons(gui: (f32, f32), buttons: &[TouchButton]) -> Vec<(TouchButt
             TouchButton::AddWaypoint => 82.0,
             TouchButton::ZoomIn | TouchButton::ZoomOut => 28.0,
             TouchButton::Teleport => 66.0,
+            TouchButton::Rename => 52.0,
             TouchButton::Delete => 48.0,
             TouchButton::Done | TouchButton::Reset => 64.0,
         })

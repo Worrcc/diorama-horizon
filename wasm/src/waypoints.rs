@@ -38,6 +38,7 @@ const HIDE: u32 = 103;
 const DELETE: u32 = 104;
 const MAP: u32 = 105;
 const ADD: u32 = 106;
+const RENAME: u32 = 107;
 
 /// The waypoint side of the mod's state.
 pub struct Waypoints {
@@ -410,6 +411,7 @@ impl Diorama {
                         format!("Colour: {}", wp::color_name(w.color)),
                     ));
                     widgets.push(button(HIDE, if w.visible { "Hide" } else { "Show" }.into()));
+                    widgets.push(button(RENAME, "Rename...".into()));
                     widgets.push(button(
                         DELETE,
                         if self.wp.confirm {
@@ -421,7 +423,7 @@ impl Diorama {
                 }
                 None => widgets.push(Widget::Text(TextWidget {
                     id: 0,
-                    text: "Pick one. /dwp rename names it".into(),
+                    text: "Pick a waypoint for its actions".into(),
                     color: 0xA0_A0A0,
                 })),
             }
@@ -449,6 +451,15 @@ impl Diorama {
                 Ok(t) | Err(t) => chat::show(&t),
             }
             self.show_list();
+            return true;
+        }
+        if id == RENAME && self.wp.open {
+            if let Some(i) = self.wp.selected.filter(|&i| i < self.wp.set.list.len()) {
+                // The chat box (and the phone's keyboard) with the rename command typed in.
+                self.list_closed();
+                ui::close_screen();
+                chat::open(&format!("/dwp rename {} ", i + 1));
+            }
             return true;
         }
         if id == MAP && self.wp.open {

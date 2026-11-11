@@ -70,7 +70,11 @@ impl FullMap {
     fn touch_actions(&self) -> Vec<(layout::TouchButton, layout::Rect)> {
         let mut buttons = layout::touch_buttons(
             render::gui_size(),
-            &[layout::TouchButton::Teleport, layout::TouchButton::Delete],
+            &[
+                layout::TouchButton::Teleport,
+                layout::TouchButton::Rename,
+                layout::TouchButton::Delete,
+            ],
         );
         for (_, r) in &mut buttons {
             r.y = 34.0;
@@ -432,6 +436,14 @@ impl Diorama {
                         (layout::TouchButton::Teleport, Some(i)) => match self.teleport(i) {
                             Ok(t) | Err(t) => chat::show(&t),
                         },
+                        (layout::TouchButton::Rename, Some(i)) => {
+                            // The chat box (and the phone's keyboard) with the rename
+                            // command typed in: the player adds the name and sends it.
+                            self.fullmap = Some(f);
+                            self.close_fullmap();
+                            chat::open(&format!("/dwp rename {} ", i + 1));
+                            return;
+                        }
                         (layout::TouchButton::Delete, Some(i)) => {
                             self.removed(i);
                             self.wp_changed();
@@ -612,6 +624,7 @@ fn draw_touch_button(out: &mut Vec<Shape>, button: layout::TouchButton, r: layou
         layout::TouchButton::ZoomIn => "+",
         layout::TouchButton::ZoomOut => "−",
         layout::TouchButton::Teleport => "Teleport",
+        layout::TouchButton::Rename => "Rename",
         layout::TouchButton::Delete => "Delete",
         layout::TouchButton::Done => "Done",
         layout::TouchButton::Reset => "Reset",
