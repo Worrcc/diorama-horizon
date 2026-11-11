@@ -1,0 +1,52 @@
+     Locking 1 package to highest compatible version
+    Updating diorama-core v0.3.2 (/home/worc/Projects/diorama-horizon/core) -> v0.4.0
+    Blocking waiting for file lock on build directory
+   Compiling diorama-core v0.4.0 (/home/worc/Projects/diorama-horizon/core)
+   Compiling horizon-mods v0.1.0 (/home/worc/Projects/iaf-swarm/mousetweaks-api/crates/horizon-mods)
+   Compiling diorama-bench v0.0.1 (/home/worc/Projects/diorama-horizon/bench)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 25s
+     Running `/home/worc/Projects/diorama-horizon/target-codex/release/diorama-bench ../target-codex/horizon-mod/diorama-m1m2-before.hmod`
+diorama-bench: /home/worc/Projects/diorama-horizon/target-codex/diorama-bench-31/diorama.hmod on Pulley
+  world made in 2.2 s
+  init 741 ms
+  join [mod diorama] bake steps cost now: read 14 us, prepare 129 us, set 196 us, a row 94 us, a KiB up 176 us
+  join [mod diorama] bake steps average: read 94.5 us, prepare 110.5 us, set 161.9 us, row 133.7 us, upload 134.8 us/KiB
+  join     frame   5269 calls: avg    382 µs, p99    571 µs, max   5998 µs, 4642 over 300 µs, 295 over 500 µs (worst: call 0)
+  join     tick    1757 calls: avg     50 µs, p99     73 µs, max   3537 µs, 1 over 300 µs, 1 over 500 µs (worst: call 0)
+  join     fill: box 59 frames = 0.98 s at 60 fps; all 5269 frames = 87.82 s at 60 fps
+  join storage: 31 bytes on disk (traffic in explored storage telemetry)
+  leave callback 4846 µs
+  leave saves drained in 1 menu frames; 31 bytes on disk
+  rejoin [mod diorama] bake steps cost now: read 14 us, prepare 138 us, set 209 us, a row 95 us, a KiB up 160 us
+  rejoin [mod diorama] bake steps average: read 96.4 us, prepare 112.0 us, set 163.9 us, row 144.9 us, upload 148.3 us/KiB
+  rejoin   frame   5808 calls: avg    433 µs, p99   3053 µs, max   8972 µs, 4988 over 300 µs, 587 over 500 µs (worst: call 3402)
+  rejoin   tick    1936 calls: avg     79 µs, p99    508 µs, max   5489 µs, 23 over 300 µs, 20 over 500 µs (worst: call 1394)
+  rejoin saved box: not shown; chunk reads before shown: None
+  rejoin rebaked: box 56 frames = 0.93 s at 60 fps; all 5806 frames = 96.77 s at 60 fps
+  stand [mod diorama] bake steps cost now: read 14 us, prepare 138 us, set 209 us, a row 95 us, a KiB up 160 us
+  stand [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+  stand    frame    600 calls: avg     31 µs, p99    118 µs, max    207 µs, 0 over 300 µs, 0 over 500 µs (worst: call 97)
+  stand    tick     200 calls: avg     52 µs, p99    137 µs, max    219 µs, 0 over 300 µs, 0 over 500 µs (worst: call 179)
+  fullmap-open command 73504 µs
+  fullmap-open chunk reads: 0; granted 4000 µs
+  fullmap-open [mod diorama] bake steps cost now: read 14 us, prepare 138 us, set 209 us, a row 0 us, a KiB up 82 us
+  fullmap-open [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 7.9 us, upload 48.9 us/KiB
+  fullmap-open frame    237 calls: avg   3630 µs, p99   7409 µs, max   8559 µs, 237 over 300 µs, 237 over 500 µs (worst: call 137)
+  fullmap-open tick      79 calls: avg     66 µs, p99    204 µs, max    204 µs, 0 over 300 µs, 0 over 500 µs (worst: call 60)
+  fullmap-open fill: visible 237 frames = 3.95 s at 60 fps (cap 24000 frames = 400 s)
+  fullmap-close callback 10041 µs
+  fullmap-close chunk reads: 0
+  fullmap-close [mod diorama] bake steps cost now: read 14 us, prepare 138 us, set 209 us, a row 0 us, a KiB up 82 us
+  fullmap-close [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+  fullmap-close frame      1 calls: avg    241 µs, p99    241 µs, max    241 µs, 0 over 300 µs, 0 over 500 µs (worst: call 0)
+  fullmap-close fill: box 1 frames = 0.02 s at 60 fps
+  refill [mod diorama] bake steps cost now: read 20 us, prepare 158 us, set 240 us, a row 123 us, a KiB up 192 us
+  refill [mod diorama] bake steps average: read 118.0 us, prepare 133.8 us, set 198.5 us, row 166.3 us, upload 163.4 us/KiB
+  refill   frame   6799 calls: avg    469 µs, p99   3440 µs, max   8029 µs, 5483 over 300 µs, 661 over 500 µs (worst: call 2348)
+  refill   tick    2266 calls: avg     90 µs, p99    356 µs, max   7866 µs, 25 over 300 µs, 19 over 500 µs (worst: call 713)
+  refill   fill: box 91 frames = 1.52 s at 60 fps; all 6799 frames = 113.32 s at 60 fps
+  fly [mod diorama] bake steps cost now: read 76 us, prepare 193 us, set 262 us, a row 99 us, a KiB up 320 us
+  fly [mod diorama] bake steps average: read 113.7 us, prepare 167.6 us, set 253.4 us, row 93.7 us, upload 110.9 us/KiB
+  fly      frame   3600 calls: avg    456 µs, p99   1334 µs, max   7429 µs, 3368 over 300 µs, 788 over 500 µs (worst: call 865)
+  fly      tick    1200 calls: avg    159 µs, p99    994 µs, max   1499 µs, 85 over 300 µs, 81 over 500 µs (worst: call 819)
+  last bake line: [mod diorama] bake: 600 frames, avg 429 us/frame, busy 600 frames avg 429 us, max 500 us, 97 spent, dearest step 341 us (read 271 us, paint 341 us, recentre 499 us) (budget 500 us); split read 51040 us, paint 50120 us, upload 28392 us, draw 19164 us (dearest 44 us); 94 

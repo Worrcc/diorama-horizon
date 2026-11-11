@@ -13,6 +13,7 @@
 //! only talks to Horizon.
 use std::collections::BTreeSet;
 
+mod explored;
 mod fullmap;
 mod move_screen;
 mod waypoints;
@@ -43,7 +44,7 @@ use horizon_mod_sdk::{
 const SIDE: u32 = 512;
 /// Heap grown at start: the mosaic (3.4 MB) and some 700 cached chunks
 /// (about 25 KB each).
-const HEAP_RESERVE: usize = 24 << 20;
+const HEAP_RESERVE: usize = 44 << 20;
 const HEAP_BLOCK: usize = 64 << 10;
 /// Chunks read around the player, and how far cached ones are kept.
 const RADIUS: u32 = 12;
@@ -72,7 +73,7 @@ const READ_GUESS: f64 = 1_500_000.0;
 const SET_GUESS: f64 = 700_000.0;
 const REBUILD_GUESS: f64 = 300_000.0;
 /// Texel bytes uploaded per frame at most (the host's 1 MiB limit).
-const UPLOAD_BYTES: usize = 1024 * 1024;
+const UPLOAD_BYTES: usize = (1024 * 1024) - (16 * 1024);
 /// Rows of one strip painted per step at most.
 const MAX_ROWS: u32 = 64;
 /// Frames per cost line in the log.
@@ -187,6 +188,9 @@ fn hex(c: u32) -> String {
 
 struct Diorama {
     mosaic: Mosaic,
+    saved: explored::Saved,
+    saved_shown: bool,
+    world_id: Option<String>,
     painter: Painter,
     /// Block names and each state's block, for `/diorama colour`.
     blocks: Vec<String>,
@@ -357,6 +361,8 @@ impl Diorama {
     }
 
     fn set_cut(&mut self, cut: Option<i32>) {
+        self.saved.flush();
+        self.saved.invalidate();
         self.cut = cut;
         self.painter.cave = cut;
         self.mosaic.outline_depth = if cut.is_some() {
@@ -484,6 +490,9 @@ impl Diorama {
     }
 
     fn reset(&mut self) {
+        self.saved.flush();
+        self.saved.invalidate();
+        self.saved_shown = false;
         self.close_fullmap();
         self.finish_move();
         self.mosaic.clear();
@@ -757,6 +766,7 @@ impl Diorama {
         u: f64,
         mut busy: bool,
         keep_seen: bool,
+        player: &game::Player,
     ) -> (bool, usize, usize) {
         let (mut chunks, mut reads, mut focus_uploaded) = (0, 0, 0);
         // What drawing the box and the rest of the frame after the bake
@@ -766,13 +776,16 @@ impl Diorama {
         loop {
             let raw = canvas::work_left();
             let left = raw.saturating_sub(tail);
+            let capture_room = self.saved.can_capture();
             let waiting = Waiting {
                 rebuild: self.rebuild.is_some(),
                 ready: self.ready.is_some(),
-                pending: !self.pending.is_empty(),
-                painting: self.mosaic.painting(),
-                focus_pending: self.ready.is_none() && self.focus_pending(centre).is_some(),
-                focus_painting: self.mosaic.focus_painting(),
+                pending: !self.pending.is_empty() && (keep_seen || !self.saved.restoring()),
+                painting: self.mosaic.painting() && capture_room,
+                focus_pending: self.ready.is_none()
+                    && self.focus_pending(centre).is_some()
+                    && (keep_seen || !self.saved.restoring()),
+                focus_painting: self.mosaic.focus_painting() && capture_room,
                 focus_uploading: self.mosaic.focus_uploading(),
             };
             let costs = budget::Costs {
@@ -783,7 +796,7 @@ impl Diorama {
                 },
                 rebuild: self.rebuild_rate.of(1),
                 paint_row: self.paint_rate.of(1),
-                upload_row: self.upload_rate.of(self.mosaic.strip() * 4),
+                upload_row: self.upload_rate.of(self.mosaic.side() * 4),
             };
             let step = budget::next(left, reads, !busy, waiting, &costs);
             let step_started = canvas::work_left();
@@ -836,6 +849,15 @@ impl Diorama {
                     let before_rows = self.mosaic.stats.rows;
                     self.mosaic.paint_step(&self.painter, u, rows);
                     let painted = self.mosaic.stats.rows - before_rows;
+                    if painted > 0 {
+                        self.saved.capture(
+                            &self.mosaic,
+                            player,
+                            self.cut,
+                            self.settings.flat_style(),
+                            self.clock,
+                        );
+                    }
                     self.paint_rate
                         .after(spent(), painted as u32, canvas::work_left());
                     self.step_cost(3, spent(), painted);
@@ -848,7 +870,7 @@ impl Diorama {
                         &self.upload_rate,
                         left,
                         !busy,
-                        self.mosaic.strip() * 4,
+                        self.mosaic.side() * 4,
                         UPLOAD_PIECE.min(UPLOAD_BYTES - focus_uploaded) as u32,
                     );
                     let (image, outline) = (self.image, self.painter.style.outline);
@@ -881,8 +903,7 @@ impl Diorama {
         let image = self.image;
         let mut failed = None;
         let outline = self.painter.style.outline;
-        // Outlines are worked out as texels go up, so the upload is paid for
-        // in pieces sized to the work left.
+        // Final RGBA strips are copied natively; size them to the work left.
         let mut uploaded = focus_uploaded;
         loop {
             let raw = canvas::work_left();
@@ -894,7 +915,7 @@ impl Diorama {
                 &self.upload_rate,
                 left,
                 !busy && uploaded == 0,
-                self.mosaic.strip() * 4,
+                self.mosaic.side() * 4,
                 UPLOAD_PIECE.min(UPLOAD_BYTES - uploaded) as u32,
             );
             let n = self.mosaic.take_upload(piece, outline, |x, y, w, h, rgba| {
@@ -1056,6 +1077,7 @@ impl Diorama {
         let mosaic = std::mem::replace(&mut self.mosaic, Mosaic::with_texels(proj, 16, 1));
         let side = SIDE;
         self.mosaic = mosaic.resized(side, 1);
+        self.saved.remember_detail();
         self.paint_rate = budget::Rate::new(PAINT_ROW_GUESS);
         self.upload_rate = budget::Rate::new(UPLOAD_BYTE_GUESS);
         self.paint_rate.rescale(BUDGET_US, self.granted);
@@ -1228,7 +1250,18 @@ impl Mod for Diorama {
         }
         let state = Diorama {
             touch: false,
-            mosaic: Mosaic::new(Projection::new(style.pitch_degrees), SIDE),
+            mosaic: Mosaic::with_texels(
+                Projection::new(style.pitch_degrees),
+                SIDE,
+                if storage::get("map_detail").as_deref() == Some(b"1") {
+                    1
+                } else {
+                    2
+                },
+            ),
+            saved: explored::Saved::new(),
+            saved_shown: false,
+            world_id: None,
             painter: Painter::new(looks, style),
             blocks: table.blocks,
             state_block: table.state_block,
@@ -1292,8 +1325,19 @@ impl Mod for Diorama {
         match args.split_whitespace().collect::<Vec<_>>()[..] {
             ["profile"] => {
                 self.log_steps();
+                horizon_mod_sdk::info(&format!(
+                    "explored storage: {} bytes written; {} pixels encoded, {:.1} us/KiB RLE; pending {}",
+                    self.saved.written,
+                    self.saved.encode_pixels,
+                    self.saved.encode_work as f64 * 256.0 / (budget::WORK_SCALE as f64 * self.saved.encode_pixels.max(1) as f64),
+                    self.saved.pending()
+                ));
                 self.step_work = [0; 5];
                 self.step_units = [0; 5];
+                return Ok(None);
+            }
+            ["save"] => {
+                self.saved.flush();
                 return Ok(None);
             }
             ["map"] => {
@@ -1383,9 +1427,12 @@ impl Mod for Diorama {
             }
             return;
         };
-        if self.dimension.as_deref() != Some(p.dimension.as_str()) {
+        let world_id = game::world_id();
+        self.saved.world = world_id.clone();
+        if self.dimension.as_deref() != Some(p.dimension.as_str()) || self.world_id != world_id {
             self.reset();
             self.dimension = Some(p.dimension.clone());
+            self.world_id = world_id;
             self.ceiling = client_world::dimension().is_some_and(|d| d.ceiling);
         }
         if self.fullmap.is_some() {
@@ -1455,7 +1502,19 @@ impl Mod for Diorama {
     fn frame(&mut self, seconds: f32) {
         self.frame_no = self.frame_no.wrapping_add(1);
         self.clock += f64::from(seconds);
-        let Some(p) = game::get_player() else {
+        let player = game::get_player();
+        if let Some(p) = &player {
+            self.saved.sync(p, self.cut, self.settings.flat_style());
+        }
+        if player.is_none() && self.dimension.take().is_some() {
+            self.reset();
+        }
+        self.saved.step(
+            self.clock,
+            self.pending.is_empty() && !self.mosaic.painting(),
+            self.granted,
+        );
+        let Some(p) = player else {
             if self.shown.take().is_some() {
                 canvas::clear_corner();
             }
@@ -1480,12 +1539,32 @@ impl Mod for Diorama {
             self.cost
                 .recentre(before.saturating_sub(canvas::work_left()));
         }
-        let (busy, chunks, uploaded) = self.bake_frame(centre, u, busy, false);
+        self.saved
+            .restore_hud(&mut self.mosaic, &p, self.cut, self.settings.flat_style());
+        let (busy, chunks, uploaded) = self.bake_frame(centre, u, busy, false, &p);
         let before = canvas::work_left();
         self.draw(&p);
         self.draw_move();
         self.cost.draw(before.saturating_sub(canvas::work_left()));
         self.watch_fill();
+        if !self.saved_shown && self.saved.has_restored() {
+            if let Some((x, y, w, h)) = self.window {
+                if self.saved.box_restored(&self.mosaic, (x, y, w, h))
+                    && self.mosaic.window_done(
+                        x as u32,
+                        y as u32,
+                        (x + w).ceil() as u32,
+                        (y + h).ceil() as u32,
+                    )
+                {
+                    self.saved_shown = true;
+                    horizon_mod_sdk::info(&format!(
+                        "saved fill: the box, {} frames",
+                        self.fill.as_ref().map_or(0, |f| f.frames)
+                    ));
+                }
+            }
+        }
         self.tail_rate.after(
             before.saturating_sub(canvas::work_left()),
             1,

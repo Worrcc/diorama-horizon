@@ -586,7 +586,7 @@ impl Bench {
         self.mods.take_canvas_uploads(false);
         self.mods.drain();
         if let Status::Failed(e) = &self.mods.entries()[0].status {
-            panic!("the mod stopped: {e}");
+            panic!("the mod stopped at frame {}: {e}; last logs: {:?}",self.frame,LINES.lock().unwrap().iter().rev().take(8).collect::<Vec<_>>());
         }
     }
     /// Frames until the mod logs that the whole mosaic is filled (at most `cap`).
@@ -623,7 +623,10 @@ fn report(name: &str, t: &Times, b: &mut Bench) {
     b.mods.command("diorama profile");
     let mut estimates = false;
     for line in &LINES.lock().unwrap()[from..] {
-        if line.contains("bake steps average:") || line.contains("bake steps cost now:") {
+        if line.contains("bake steps average:")
+            || line.contains("bake steps cost now:")
+            || line.contains("explored storage:")
+        {
             println!("  {name} {line}");
             estimates |= line.contains("bake steps cost now:");
         }
@@ -801,6 +804,23 @@ fn native() {
     );
 }
 
+fn storage_bytes(path: &std::path::Path) -> u64 {
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| {
+            if e.path().is_dir() {
+                storage_bytes(&e.path())
+            } else if e.file_name() != "diorama.hmod" {
+                e.metadata().map_or(0, |m| m.len())
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--native") {
         return native();
@@ -808,13 +828,18 @@ fn main() {
     let hmod = std::env::args()
         .nth(1)
         .expect("usage: diorama-bench <diorama.hmod>");
-    let hmod = std::fs::canonicalize(&hmod).expect("the .hmod");
+    let original = std::fs::canonicalize(&hmod).expect("the .hmod");
+    let scratch_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| original.parent().unwrap().to_path_buf());
+    let dir = scratch_root.join(format!("diorama-bench-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let hmod = dir.join("diorama.hmod");
+    std::fs::copy(&original, &hmod).unwrap();
     log::set_logger(&Keep).unwrap();
     log::set_max_level(log::LevelFilter::Info);
-    // The mod's storage goes under the working directory: a scratch one.
-    let dir = std::env::temp_dir().join(format!("diorama-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
+    // Storage is beside the .hmod; copying it isolates this run on real disk.
     let engine = if cfg!(feature = "pulley") {
         "Pulley"
     } else {
@@ -856,7 +881,12 @@ fn main() {
     b.snapshot();
     b.mods.lend_client_world(Box::new(b.view.clone()));
     let started = Instant::now();
-    b.mods.load_into(Runs::Client, &[hmod], |_| true, |_| false);
+    b.mods.load_into(
+        Runs::Client,
+        std::slice::from_ref(&hmod),
+        |_| true,
+        |_| false,
+    );
     b.mods.take_client_world();
     if let Status::Failed(e) = &b.mods.entries()[0].status {
         panic!("the mod didn't start: {e}");
@@ -871,6 +901,97 @@ fn main() {
         fill(&visible),
         fill(&all)
     );
+
+    let join_bytes = storage_bytes(&dir);
+    println!("  join storage: {join_bytes} bytes on disk (traffic in explored storage telemetry)");
+
+    // Leave without rebuilding/compressing all tiles in the callback. The host
+    // keeps frame hooks running at the menu so pending units drain there.
+    b.mods.set_snapshot(Snapshot::default());
+    let started = Instant::now();
+    b.mods.tick(b.tick + 1);
+    println!(
+        "  leave callback {:.0} µs",
+        started.elapsed().as_secs_f64() * 1e6
+    );
+    let mut drained = 0;
+    for frame in 0..24_000 {
+        b.mods.frame((1.0 / FPS) as f32);
+        b.mods.take_canvas_uploads(false);
+        if frame % 16 == 0 {
+            let from = LINES.lock().unwrap().len();
+            b.mods.command("diorama profile");
+            let lines = LINES.lock().unwrap();
+            if lines[from..]
+                .iter()
+                .any(|l| l.contains("explored storage:") && l.ends_with("pending false"))
+                || !lines[from..]
+                    .iter()
+                    .any(|l| l.contains("explored storage:"))
+            {
+                drained = frame + 1;
+                break;
+            }
+        }
+    }
+    println!(
+        "  leave saves drained in {drained} menu frames; {} bytes on disk",
+        storage_bytes(&dir)
+    );
+    // Discard guest memory: rejoin must get its background from storage.
+    b.mods = Mods::default();
+    b.snapshot();
+    b.mods.lend_client_world(Box::new(b.view.clone()));
+    b.mods.load_into(
+        Runs::Client,
+        std::slice::from_ref(&hmod),
+        |_| true,
+        |_| false,
+    );
+    b.mods.take_client_world();
+    if let Status::Failed(e) = &b.mods.entries()[0].status {
+        panic!("rejoin init: {e}");
+    }
+    let mut t = Times::default();
+    let mut saved = None;
+    let reads = b.reads();
+    let mut reads_at_saved = None;
+    let (mut visible, mut all) = (None, None);
+    let mut from = LINES.lock().unwrap().len();
+    for frame in 0..FILL_CAP {
+        b.step(&mut t);
+        let lines = LINES.lock().unwrap();
+        for l in &lines[from..] {
+            if l.contains("saved fill: the box") && saved.is_none() {
+                saved = Some(format!("{l}; observed at {} frames", frame + 1));
+                reads_at_saved = Some(b.reads() - reads);
+            }
+            if l.contains("fill: the box's map") {
+                visible.get_or_insert_with(|| l.clone());
+            }
+            if l.contains("fill: all") {
+                all.get_or_insert_with(|| l.clone());
+            }
+        }
+        from = lines.len();
+        if all.is_some() {
+            break;
+        }
+    }
+    report("rejoin", &t, &mut b);
+    println!(
+        "  rejoin saved box: {}; chunk reads before shown: {:?}",
+        saved.as_deref().unwrap_or("not shown"),
+        reads_at_saved
+    );
+    println!(
+        "  rejoin rebaked: box {}; all {}",
+        fill(&visible),
+        fill(&all)
+    );
+    if storage_bytes(&dir) > 0 && saved.is_some() {
+        assert_eq!(reads_at_saved, Some(0), "saved box precedes any chunk read");
+    }
 
     let mut t = Times::default();
     for _ in 0..600 {

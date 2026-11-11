@@ -7,7 +7,7 @@ exclude = ["bench"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.3.2"
+version = "0.4.0"
 
 [profile.release]
 # Let LLVM inline the core painter across the WASM crate boundary. Calls and

@@ -1,0 +1,183 @@
+   Compiling diorama-bench v0.0.1 (/home/worc/Projects/diorama-horizon/bench)
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.21s
+     Running `target-codex/release/diorama-bench target/horizon-mod/diorama.hmod`
+diorama-bench: /home/worc/Projects/diorama-horizon/target-codex/diorama-bench-4/diorama.hmod on Pulley
+  world made in 3.8 s
+    [mod diorama] diorama: 512x512 mosaic, frame budget 300 us; block looks version 1: 10 states from 11 textures averaged
+  init 1294 ms
+    [mod diorama] diorama: world sp:Bench: 0 waypoints (wp-66f8513ca94d9d6a)
+    [mod diorama] bake budget: requested 500 us, granted 500 us
+    [mod diorama] diorama: slow engine (a chunk set costs 187 us of the 500 us budget): 1 texel a block, 512x512 mosaic
+    [mod diorama] fill: the box's map after 1.88 s (read 7393 us, paint 20972 us, upload 396 us), 113 frames
+    [mod diorama] saved fill: the box, 113 frames
+    [mod diorama] bake queue: 279 cached, 346 pending, ready false, 3379 dirty rows, 125 painted rows
+    [mod diorama] bake: 600 frames, avg 346 us/frame, busy 600 frames avg 346 us, max 500 us, 17 spent, dearest step 415 us (read 225 us, paint 415 us, recentre 496 us) (budget 500 us); split read 120674 us, paint 20972 us, upload 3737 us, draw 1362 us (dearest 3 us); 279 c
+    [mod diorama] bake steps cost now: read 120 us, prepare 89 us, set 193 us, a row 255 us, a KiB up 3 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 7564 dirty rows, 216 painted rows
+    [mod diorama] bake: 600 frames, avg 351 us/frame, busy 600 frames avg 351 us, max 500 us, 1 spent, dearest step 368 us (read 242 us, paint 368 us, recentre 0 us) (budget 500 us); split read 140579 us, paint 25001 us, upload 3511 us, draw 1512 us (dearest 3 us); 346 chun
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 360 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 6965 dirty rows, 815 painted rows
+    [mod diorama] bake: 600 frames, avg 374 us/frame, busy 600 frames avg 374 us, max 500 us, 21 spent, dearest step 473 us (read 0 us, paint 473 us, recentre 0 us) (budget 500 us); split read 0 us, paint 195513 us, upload 11123 us, draw 1994 us (dearest 4 us); 0 chunks rea
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 329 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 6365 dirty rows, 1415 painted rows
+    [mod diorama] bake: 600 frames, avg 371 us/frame, busy 600 frames avg 371 us, max 500 us, 3 spent, dearest step 477 us (read 0 us, paint 477 us, recentre 0 us) (budget 500 us); split read 0 us, paint 191002 us, upload 12089 us, draw 2219 us (dearest 4 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 336 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 5766 dirty rows, 2014 painted rows
+    [mod diorama] bake: 600 frames, avg 374 us/frame, busy 600 frames avg 374 us, max 500 us, 7 spent, dearest step 464 us (read 0 us, paint 464 us, recentre 0 us) (budget 500 us); split read 0 us, paint 188042 us, upload 11882 us, draw 2156 us (dearest 5 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 377 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 5166 dirty rows, 2614 painted rows
+    [mod diorama] bake: 600 frames, avg 396 us/frame, busy 600 frames avg 396 us, max 500 us, 20 spent, dearest step 478 us (read 0 us, paint 478 us, recentre 0 us) (budget 500 us); split read 0 us, paint 209057 us, upload 10718 us, draw 1990 us (dearest 4 us); 0 chunks rea
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 413 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 4566 dirty rows, 3214 painted rows
+    [mod diorama] bake: 600 frames, avg 342 us/frame, busy 600 frames avg 342 us, max 472 us, 0 spent, dearest step 441 us (read 0 us, paint 441 us, recentre 0 us) (budget 500 us); split read 0 us, paint 173098 us, upload 11128 us, draw 1942 us (dearest 4 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 370 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 3966 dirty rows, 3814 painted rows
+    [mod diorama] bake: 600 frames, avg 358 us/frame, busy 600 frames avg 358 us, max 500 us, 1 spent, dearest step 477 us (read 0 us, paint 477 us, recentre 0 us) (budget 500 us); split read 0 us, paint 184351 us, upload 10292 us, draw 1867 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 252 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 3366 dirty rows, 4414 painted rows
+    [mod diorama] bake: 600 frames, avg 345 us/frame, busy 600 frames avg 345 us, max 467 us, 0 spent, dearest step 424 us (read 0 us, paint 424 us, recentre 0 us) (budget 500 us); split read 0 us, paint 177270 us, upload 11238 us, draw 1960 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 255 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 2766 dirty rows, 5014 painted rows
+    [mod diorama] bake: 600 frames, avg 381 us/frame, busy 600 frames avg 381 us, max 500 us, 24 spent, dearest step 476 us (read 0 us, paint 476 us, recentre 0 us) (budget 500 us); split read 0 us, paint 197904 us, upload 8960 us, draw 1824 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 263 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 2166 dirty rows, 5614 painted rows
+    [mod diorama] bake: 600 frames, avg 358 us/frame, busy 600 frames avg 358 us, max 475 us, 0 spent, dearest step 442 us (read 0 us, paint 442 us, recentre 0 us) (budget 500 us); split read 0 us, paint 182863 us, upload 10725 us, draw 1882 us (dearest 4 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 273 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 1566 dirty rows, 6214 painted rows
+    [mod diorama] bake: 600 frames, avg 373 us/frame, busy 600 frames avg 373 us, max 500 us, 1 spent, dearest step 454 us (read 0 us, paint 454 us, recentre 0 us) (budget 500 us); split read 0 us, paint 192633 us, upload 9699 us, draw 1709 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 362 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 966 dirty rows, 6814 painted rows
+    [mod diorama] bake: 600 frames, avg 350 us/frame, busy 600 frames avg 350 us, max 474 us, 0 spent, dearest step 442 us (read 0 us, paint 442 us, recentre 0 us) (budget 500 us); split read 0 us, paint 182278 us, upload 10067 us, draw 1769 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 336 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 366 dirty rows, 7414 painted rows
+    [mod diorama] bake: 600 frames, avg 353 us/frame, busy 600 frames avg 353 us, max 500 us, 5 spent, dearest step 476 us (read 0 us, paint 476 us, recentre 0 us) (budget 500 us); split read 0 us, paint 183981 us, upload 9600 us, draw 1695 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 436 us, a KiB up 1 us
+    [mod diorama] fill: all 625 chunks after 146.10 s (read 261254 us, paint 2404795 us, upload 140962 us), 8766 frames
+    [mod diorama] bake budget: requested 300 us, granted 300 us
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 105.7 us, prepare 126.0 us, set 186.1 us, row 309.0 us, upload 2.3 us/KiB
+    [mod diorama] explored storage: 330326 bytes written; 135168 pixels encoded, 48.3 us/KiB RLE; pending true
+  join [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+  join [mod diorama] bake steps average: read 105.7 us, prepare 126.0 us, set 186.1 us, row 309.0 us, upload 2.3 us/KiB
+  join [mod diorama] explored storage: 330326 bytes written; 135168 pixels encoded, 48.3 us/KiB RLE; pending true
+  join     frame   8766 calls: avg    473 µs, p99    687 µs, max 549068 µs, 7224 over 300 µs, 260 over 500 µs (worst: call 7085)
+  join     tick    2922 calls: avg     57 µs, p99     98 µs, max   5037 µs, 4 over 300 µs, 2 over 500 µs (worst: call 0)
+  join     fill: box 113 frames = 1.88 s at 60 fps; all 8766 frames = 146.10 s at 60 fps
+  join storage: 303252 bytes on disk (traffic in explored storage telemetry)
+    [mod diorama] diorama: resources reloaded (block table version 1 -> 0): averaging 0 textures again
+  leave callback 5851 µs
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 330326 bytes written; 135168 pixels encoded, 48.3 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 330825 bytes written; 139264 pixels encoded, 47.4 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 330825 bytes written; 143104 pixels encoded, 47.1 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 345808 bytes written; 146944 pixels encoded, 46.8 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 360089 bytes written; 150784 pixels encoded, 46.6 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 374508 bytes written; 154624 pixels encoded, 46.5 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 389101 bytes written; 158464 pixels encoded, 46.4 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 400772 bytes written; 162304 pixels encoded, 45.7 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 400929 bytes written; 166144 pixels encoded, 45.0 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 404908 bytes written; 169984 pixels encoded, 44.4 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 407933 bytes written; 173824 pixels encoded, 44.0 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 411918 bytes written; 177664 pixels encoded, 43.6 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 415753 bytes written; 181504 pixels encoded, 43.4 us/KiB RLE; pending true
+    [mod diorama] bake steps cost now: read 14 us, prepare 149 us, set 226 us, a row 244 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 0.0 us, prepare 0.0 us, set 0.0 us, row 0.0 us, upload 0.0 us/KiB
+    [mod diorama] explored storage: 419210 bytes written; 184320 pixels encoded, 43.2 us/KiB RLE; pending false
+  leave saves drained in 209 menu frames; 390984 bytes on disk
+    [mod diorama] diorama: 512x512 mosaic, frame budget 300 us; block looks version 1: 10 states from 11 textures averaged
+    [mod diorama] diorama: world sp:Bench: 0 waypoints (wp-66f8513ca94d9d6a)
+    [mod diorama] bake budget: requested 500 us, granted 500 us
+    [mod diorama] diorama: 1 texels a block (a chunk set costs 162 us)
+    [mod diorama] fill: the box's map after 3.00 s (read 8420 us, paint 26704 us, upload 437 us), 180 frames
+    [mod diorama] saved fill: the box, 180 frames
+    [mod diorama] bake queue: 340 cached, 285 pending, ready false, 13759 dirty rows, 204 painted rows
+    [mod diorama] bake: 600 frames, avg 385 us/frame, busy 600 frames avg 385 us, max 500 us, 45 spent, dearest step 348 us (read 188 us, paint 348 us, recentre 496 us) (budget 500 us); split read 126053 us, paint 26704 us, upload 2804 us, draw 1102 us (dearest 2 us); 340 c
+    [mod diorama] bake steps cost now: read 89 us, prepare 132 us, set 166 us, a row 258 us, a KiB up 3 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 14226 dirty rows, 601 painted rows
+    [mod diorama] bake: 600 frames, avg 390 us/frame, busy 600 frames avg 390 us, max 500 us, 2 spent, dearest step 445 us (read 225 us, paint 445 us, recentre 0 us) (budget 500 us); split read 98363 us, paint 99781 us, upload 5483 us, draw 1357 us (dearest 3 us); 285 chunk
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 424 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 13457 dirty rows, 1370 painted rows
+    [mod diorama] bake: 600 frames, avg 346 us/frame, busy 600 frames avg 346 us, max 475 us, 0 spent, dearest step 443 us (read 0 us, paint 443 us, recentre 0 us) (budget 500 us); split read 0 us, paint 180434 us, upload 9524 us, draw 1541 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 383 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 12615 dirty rows, 2212 painted rows
+    [mod diorama] bake: 600 frames, avg 328 us/frame, busy 600 frames avg 328 us, max 431 us, 0 spent, dearest step 383 us (read 0 us, paint 383 us, recentre 0 us) (budget 500 us); split read 0 us, paint 168991 us, upload 9770 us, draw 1633 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 278 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 11771 dirty rows, 3056 painted rows
+    [mod diorama] bake: 600 frames, avg 356 us/frame, busy 600 frames avg 356 us, max 500 us, 1 spent, dearest step 480 us (read 0 us, paint 480 us, recentre 0 us) (budget 500 us); split read 0 us, paint 181245 us, upload 9199 us, draw 1544 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 362 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 11040 dirty rows, 3787 painted rows
+    [mod diorama] bake: 600 frames, avg 352 us/frame, busy 600 frames avg 352 us, max 480 us, 0 spent, dearest step 453 us (read 0 us, paint 453 us, recentre 0 us) (budget 500 us); split read 0 us, paint 184117 us, upload 9355 us, draw 1596 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 303 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 10223 dirty rows, 4604 painted rows
+    [mod diorama] bake: 600 frames, avg 339 us/frame, busy 600 frames avg 339 us, max 497 us, 0 spent, dearest step 440 us (read 0 us, paint 440 us, recentre 0 us) (budget 500 us); split read 0 us, paint 173045 us, upload 9882 us, draw 1622 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 264 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 9379 dirty rows, 5448 painted rows
+    [mod diorama] bake: 600 frames, avg 339 us/frame, busy 600 frames avg 339 us, max 468 us, 0 spent, dearest step 433 us (read 0 us, paint 433 us, recentre 0 us) (budget 500 us); split read 0 us, paint 174746 us, upload 9738 us, draw 1598 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 224 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 8574 dirty rows, 6253 painted rows
+    [mod diorama] bake: 600 frames, avg 313 us/frame, busy 600 frames avg 313 us, max 439 us, 0 spent, dearest step 378 us (read 0 us, paint 378 us, recentre 0 us) (budget 500 us); split read 0 us, paint 158398 us, upload 10515 us, draw 1750 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 128 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 7853 dirty rows, 6974 painted rows
+    [mod diorama] bake: 600 frames, avg 335 us/frame, busy 600 frames avg 335 us, max 472 us, 0 spent, dearest step 439 us (read 0 us, paint 439 us, recentre 0 us) (budget 500 us); split read 0 us, paint 173205 us, upload 9272 us, draw 1582 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 239 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 7062 dirty rows, 7765 painted rows
+    [mod diorama] bake: 600 frames, avg 336 us/frame, busy 600 frames avg 336 us, max 500 us, 2 spent, dearest step 469 us (read 0 us, paint 469 us, recentre 0 us) (budget 500 us); split read 0 us, paint 173453 us, upload 9039 us, draw 1493 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 271 us, a KiB up 2 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 6183 dirty rows, 8644 painted rows
+    [mod diorama] bake: 600 frames, avg 351 us/frame, busy 600 frames avg 351 us, max 500 us, 4 spent, dearest step 481 us (read 0 us, paint 481 us, recentre 0 us) (budget 500 us); split read 0 us, paint 180410 us, upload 10078 us, draw 1669 us (dearest 4 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 258 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 5420 dirty rows, 9407 painted rows
+    [mod diorama] bake: 600 frames, avg 337 us/frame, busy 600 frames avg 337 us, max 500 us, 2 spent, dearest step 480 us (read 0 us, paint 480 us, recentre 0 us) (budget 500 us); split read 0 us, paint 173226 us, upload 9770 us, draw 1647 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 243 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 4558 dirty rows, 10269 painted rows
+    [mod diorama] bake: 600 frames, avg 330 us/frame, busy 600 frames avg 330 us, max 500 us, 1 spent, dearest step 479 us (read 0 us, paint 479 us, recentre 0 us) (budget 500 us); split read 0 us, paint 171680 us, upload 9827 us, draw 1598 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 365 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 3712 dirty rows, 11115 painted rows
+    [mod diorama] bake: 600 frames, avg 326 us/frame, busy 600 frames avg 326 us, max 474 us, 0 spent, dearest step 436 us (read 0 us, paint 436 us, recentre 0 us) (budget 500 us); split read 0 us, paint 167329 us, upload 9727 us, draw 1584 us (dearest 3 us); 0 chunks read,
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 351 us, a KiB up 1 us
+    [mod diorama] bake queue: 625 cached, 0 pending, ready false, 2765 dirty rows, 12062 painted rows
+    [mod diorama] bake: 600 frames, avg 339 us/frame, busy 600 frames avg 339 us, max 500 us, 16 spent, dearest step 474 us (read 0 us, paint 474 us, recentre 0 us) (budget 500 us); split read 0 us, paint 174098 us, upload 9095 us, draw 1519 us (dearest 3 us); 0 chunks read
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 108 us, a KiB up 3 us
+    [mod diorama] fill: all 625 chunks after 166.57 s (read 224416 us, paint 2667487 us, upload 152665 us), 9994 frames
+    [mod diorama] bake budget: requested 300 us, granted 300 us
+    [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 19 us, a KiB up 2 us
+    [mod diorama] bake steps average: read 91.0 us, prepare 108.8 us, set 159.1 us, row 179.9 us, upload 1.7 us/KiB
+    [mod diorama] explored storage: 509543 bytes written; 167936 pixels encoded, 44.4 us/KiB RLE; pending true
+  rejoin [mod diorama] bake steps cost now: read 15 us, prepare 131 us, set 201 us, a row 19 us, a KiB up 2 us
+  rejoin [mod diorama] bake steps average: read 91.0 us, prepare 108.8 us, set 159.1 us, row 179.9 us, upload 1.7 us/KiB
+  rejoin [mod diorama] explored storage: 509543 bytes written; 167936 pixels encoded, 44.4 us/KiB RLE; pending true
+  rejoin   frame   9994 calls: avg    472 µs, p99    750 µs, max 433414 µs, 7430 over 300 µs, 282 over 500 µs (worst: call 1)
+  rejoin   tick    3332 calls: avg    127 µs, p99     89 µs, max 262886 µs, 2 over 300 µs, 1 over 500 µs (worst: call 0)
+  rejoin saved box: [mod diorama] saved fill: the box, 180 frames; observed at 180 frames; chunk reads before shown: Some(23)
+  rejoin rebaked: box 180 frames = 3.00 s at 60 fps; all 9994 frames = 166.57 s at 60 fps
+
+thread 'main' (4) panicked at src/main.rs:993:9:
+assertion `left == right` failed: saved box precedes any chunk read
+  left: Some(23)
+ right: Some(0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -159,6 +159,12 @@ pub struct Mosaic {
     u0: i32,
     v0: i32,
     rgba: Vec<u8>,
+    /// Final outlined texels, ready for native slice uploads.
+    display: Vec<u8>,
+    /// Saved exploration, retained beneath freshly baked geometry.
+    background: Vec<u8>,
+    display_outline: f32,
+    last_painted: (u32, u32, u32, u32),
     /// Per texel: the height of the nearest face painted there (`-inf`: none).
     height: Vec<f32>,
     /// Per texel: the height of what is seen there (the floor under water),
@@ -321,6 +327,10 @@ impl Mosaic {
             u0: 0,
             v0: 0,
             rgba: vec![0; n * 4],
+            display: vec![0; n * 4],
+            background: Vec::new(),
+            display_outline: 0.0,
+            last_painted: (0, 0, 0, 0),
             height: vec![f32::NEG_INFINITY; n],
             seen: vec![0.0; n],
             wet: vec![0; n],
@@ -351,6 +361,7 @@ impl Mosaic {
         m.chunks = std::mem::take(&mut self.chunks);
         m.outline_depth = self.outline_depth;
         m.stats = self.stats;
+        m.display_outline = self.display_outline;
         let old_half = f64::from(self.side / self.tpb) / 2.0;
         let half = (side / tpb / 2) as i32;
         m.u0 = floor_to(f64::from(self.u0) + old_half, 16) - floor_to(f64::from(half), 16);
@@ -629,6 +640,8 @@ impl Mosaic {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.rgba.fill(0);
+        self.display.fill(0);
+        self.background.clear();
         self.height.fill(f32::NEG_INFINITY);
         self.seen.fill(0.0);
         self.wet.fill(0);
@@ -677,6 +690,9 @@ impl Mosaic {
     /// nearest map column `near_u`, else the dirty strip nearest it, top
     /// down. False when nothing is left to paint.
     pub fn paint_step(&mut self, shade: &impl Shade, near_u: f64, max_rows: u32) -> bool {
+        if shade.outline() != self.display_outline && self.stats.jobs > 0 {
+            self.refresh_display(0, self.side, (0, self.side), shade.outline());
+        }
         let near = (near_u - f64::from(self.u0)) * f64::from(self.tpb);
         let d = |s: usize| {
             (s as f64 * f64::from(self.strip()) + f64::from(self.strip()) / 2.0 - near).abs()
@@ -707,6 +723,18 @@ impl Mosaic {
                 self.upload[s + 1].add(rows);
             }
         }
+        self.refresh_display(
+            (s as u32 * self.strip()).saturating_sub(1),
+            ((s as u32 + 1) * self.strip() + 1).min(self.side),
+            rows,
+            shade.outline(),
+        );
+        self.last_painted = (
+            (s as u32 * self.strip()).saturating_sub(1),
+            rows.0,
+            ((s as u32 + 1) * self.strip() + 1).min(self.side),
+            rows.1,
+        );
         self.stats.jobs += 1;
         self.stats.rows += u64::from(end - r0);
         true
@@ -816,16 +844,31 @@ impl Mosaic {
         self.upload.fill(Dirty::all(self.side));
         if di.abs() >= side || dj.abs() >= side {
             self.rgba.fill(0);
+            self.display.fill(0);
+            self.background.clear();
             self.height.fill(f32::NEG_INFINITY);
             self.paint_cached();
             return;
         }
         // In place: no new buffers (3.4 MB a recentre is dear in a mod).
         shift_buf(&mut self.rgba, side, di, dj, 4, 0);
+        shift_buf(&mut self.display, side, di, dj, 4, 0);
+        if !self.background.is_empty() {
+            shift_buf(&mut self.background, side, di, dj, 4, 0);
+        }
         shift_buf(&mut self.height, side, di, dj, 1, f32::NEG_INFINITY);
         shift_buf(&mut self.seen, side, di, dj, 1, 0.0);
         shift_buf(&mut self.wet, side, di, dj, 1, 0);
 
+        if self.chunks.is_empty() {
+            self.paint.fill(Dirty::default());
+            return;
+        }
+        let outline = self.display_outline;
+        self.refresh_display(0, self.side, (0, 1), outline);
+        self.refresh_display(0, self.side, (self.side - 1, self.side), outline);
+        self.refresh_display(0, 1, (0, self.side), outline);
+        self.refresh_display(self.side - 1, self.side, (0, self.side), outline);
         let strips = self.paint.len() as i64;
         let ds = i64::from(du / 16);
         let old = std::mem::replace(&mut self.paint, vec![Dirty::default(); strips as usize]);
@@ -925,6 +968,95 @@ impl Mosaic {
         }
     }
 
+    /// Recompute only the painted neighbourhood, before uploading. Upload itself
+    /// never builds pixels. Empty fresh texels reveal the saved exploration.
+    fn refresh_display(&mut self, x0: u32, x1: u32, rows: (u32, u32), outline: f32) {
+        self.display_outline = outline;
+        let limits = self.outline_limits();
+        let mut display = std::mem::take(&mut self.display);
+        for j in rows.0..rows.1 {
+            let at = ((j * self.side + x0) * 4) as usize;
+            let end = ((j * self.side + x1) * 4) as usize;
+            let out = &mut display[at..end];
+            out.copy_from_slice(&self.rgba[at..end]);
+            if outline > 0.0 {
+                self.outline_row(j, x0, outline, limits, out);
+            }
+            if !self.background.is_empty() {
+                for (px, saved) in out
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(self.background[at..end].as_chunks::<4>().0)
+                {
+                    if px[3] == 0 {
+                        *px = *saved;
+                    }
+                }
+            }
+        }
+        self.display = display;
+    }
+
+    pub fn last_painted(&self) -> (u32, u32, u32, u32) {
+        self.last_painted
+    }
+
+    /// Final RGBA rows, including saved exploration. No world reads.
+    pub fn display_pixels(&self) -> &[u8] {
+        &self.display
+    }
+
+    /// Overlay a saved tile at world-aligned projected texel coordinates.
+    /// Fresh geometry always wins; saved colours already include outlines.
+    pub fn restore_tile(&mut self, origin: (i32, i32), tpb: u32, side: u32, rgba: &[u8]) {
+        if rgba.len() != (side * side * 4) as usize || tpb == 0 {
+            return;
+        }
+        if self.background.is_empty() {
+            self.background.resize(self.rgba.len(), 0);
+        }
+        let (u, v) = self.anchor();
+        let t = self.tpb as i64;
+        let from = |o: i32, a: i32| {
+            ((o as i64 * t).div_euclid(tpb as i64) - a as i64 * t).clamp(0, self.side as i64) as u32
+        };
+        let x0 = from(origin.0, u);
+        let y0 = from(origin.1, v);
+        let x1 = from(origin.0 + side as i32, u);
+        let y1 = from(origin.1 + side as i32, v);
+        if tpb == self.tpb && self.chunks.is_empty() {
+            for j in y0..y1 {
+                let y = (v as i64 * tpb as i64 + j as i64 - origin.1 as i64) as usize;
+                let x = (u as i64 * tpb as i64 + x0 as i64 - origin.0 as i64) as usize;
+                let at = ((j * self.side + x0) * 4) as usize;
+                let src = (y * side as usize + x) * 4;
+                let n = ((x1 - x0) * 4) as usize;
+                self.background[at..at + n].copy_from_slice(&rgba[src..src + n]);
+                self.display[at..at + n].copy_from_slice(&rgba[src..src + n]);
+            }
+        } else {
+            for j in y0..y1 {
+                let y = v as i64 * tpb as i64 + j as i64 * tpb as i64 / t - origin.1 as i64;
+                for i in x0..x1 {
+                    let x = u as i64 * tpb as i64 + i as i64 * tpb as i64 / t - origin.0 as i64;
+                    if !(0..side as i64).contains(&x) || !(0..side as i64).contains(&y) {
+                        continue;
+                    }
+                    let at = ((j * self.side + i) * 4) as usize;
+                    let src = (y as usize * side as usize + x as usize) * 4;
+                    self.background[at..at + 4].copy_from_slice(&rgba[src..src + 4]);
+                    if self.rgba[at + 3] == 0 {
+                        self.display[at..at + 4].copy_from_slice(&rgba[src..src + 4]);
+                    }
+                }
+            }
+        }
+        for strip in x0 / self.strip()..x1.div_ceil(self.strip()) {
+            self.upload[strip as usize].add((y0, y1));
+        }
+    }
+
     /// Texel `(i, j)` as uploaded: its colour darkened by `outline` where a
     /// neighbour (left, right, up, down) is more than [`OUTLINE_DEPTH`] nearer,
     /// faded by the water in front (TileBaker.java:822-840). 0 when nothing
@@ -962,51 +1094,36 @@ impl Mosaic {
         outline: f32,
         put: &mut impl FnMut(u32, u32, u32, u32, &[u8]),
     ) -> usize {
-        let ((mut s, strips), rows) = match window {
+        // Horizontal, whole-image-width strips are contiguous slices. A dirty
+        // row in any painting strip sends that row once, without guest copying.
+        if outline != self.display_outline {
+            if self.stats.jobs > 0 {
+                self.refresh_display(0, self.side, (0, self.side), outline);
+            } else {
+                self.display_outline = outline;
+            }
+        }
+        let (strips, rows) = match window {
             Some((strips, rows)) => (strips, Some(rows)),
             None => ((0, self.upload.len()), None),
         };
+        let row_bytes = self.side as usize * 4;
         let mut given = 0;
-        let mut buf = Vec::new();
-        while s < strips {
-            let Some((r0, r1)) = self.upload[s].first_in(rows) else {
-                s += 1;
-                continue;
-            };
-            let mut e = s + 1;
-            while e < strips && self.upload[e].first_in(rows) == Some((r0, r1)) {
-                e += 1;
-            }
-            // Fewer strips side by side when not one row of them all fits.
-            let strip_row = self.strip() as usize * 4;
-            e = e.min(s + ((max_bytes - given) / strip_row).max(1));
-            let (x, w) = (s as u32 * self.strip(), (e - s) as u32 * self.strip());
-            let row = w as usize * 4;
-            let n = ((max_bytes - given) / row) as u32;
-            if n == 0 {
+        while max_bytes - given >= row_bytes {
+            let next = self.upload[strips.0..strips.1]
+                .iter()
+                .filter_map(|d| d.first_in(rows))
+                .min_by_key(|r| r.0);
+            let Some((r0, r1)) = next else {
                 break;
-            }
-            let end = r1.min(r0 + n);
-            buf.clear();
-            buf.resize(row * (end - r0) as usize, 0);
-            let limits = self.outline_limits();
-            for (k, j) in (r0..end).enumerate() {
-                let out = &mut buf[k * row..(k + 1) * row];
-                let at = ((j * self.side + x) * 4) as usize;
-                out.copy_from_slice(&self.rgba[at..at + row]);
-                if outline > 0.0 {
-                    self.outline_row(j, x, outline, limits, out);
-                }
-            }
-            put(x, r0, w, end - r0, &buf);
-            given += buf.len();
-            for d in &mut self.upload[s..e] {
+            };
+            let end = r1.min(r0 + ((max_bytes - given) / row_bytes) as u32);
+            let bytes = &self.display[r0 as usize * row_bytes..end as usize * row_bytes];
+            put(0, r0, self.side, end - r0, bytes);
+            given += bytes.len();
+            for d in &mut self.upload {
                 d.remove((r0, end));
             }
-            if end < r1 {
-                break;
-            }
-            s = e;
         }
         given
     }
@@ -1684,6 +1801,62 @@ mod tests {
         assert!(!m.uploading());
         assert_eq!(calls, 64 * 64 * 4 / 4096);
         assert_eq!(got, m.pixels());
+    }
+
+    #[test]
+    fn ready_rgba_slices_match_reference_outlines_after_every_paint_and_shift() {
+        let mut m = scene_mosaic();
+        m.repaint_all();
+        let shade = Grey { wet: 3.0 };
+        let check = |m: &Mosaic| {
+            for y in 0..m.side() {
+                for x in 0..m.side() {
+                    let at = ((y * m.side() + x) * 4) as usize;
+                    assert_eq!(&m.display_pixels()[at..at + 4], &m.shown_at(x, y, 0.38));
+                }
+            }
+        };
+        while m.paint_step(&shade, 0.0, 1) {
+            check(&m);
+        }
+        m.shift(16, 8);
+        while m.paint_step(&shade, 0.0, 2) {
+            check(&m);
+        }
+        let base = m.display_pixels().as_ptr() as usize;
+        while m.take_upload(1024, 0.38, |x, y, w, h, rgba| {
+            assert_eq!(x, 0);
+            assert_eq!(w, 64);
+            assert_eq!(rgba.as_ptr() as usize, base + y as usize * 64 * 4);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }) > 0
+        {}
+    }
+
+    #[test]
+    fn saved_tiles_restore_negative_coordinates_resample_and_yield_to_fresh_paint() {
+        let mut m = Mosaic::with_texels(Projection::default(), 64, 1);
+        m.shift(-32, -32);
+        let saved = vec![123; 64 * 64 * 4];
+        m.restore_tile((-64, -64), 2, 64, &saved);
+        assert_eq!(&m.display_pixels()[..4], &[123; 4]);
+        assert_eq!(&m.display_pixels()[(32 * 64 + 32) * 4..][..4], &[0; 4]);
+        // Saved exploration survives a fresh strip with no geometry.
+        m.repaint_all();
+        paint_all(&mut m, &Grey { wet: 0.0 });
+        assert_eq!(&m.display_pixels()[..4], &[123; 4]);
+        m.set_chunk((-2, -2), Some(Chunk::from_fn(1, |_, _| Some((0, 1)))));
+        paint_all(&mut m, &Grey { wet: 0.0 });
+        for y in 0..64 {
+            for x in 0..64 {
+                if m.rgb_at(x, y).is_some() {
+                    let at = ((y * 64 + x) * 4) as usize;
+                    assert_eq!(&m.display_pixels()[at..at + 4], &m.shown_at(x, y, 0.38));
+                }
+            }
+        }
+        m.clear();
+        assert!(m.display_pixels().iter().all(|&v| v == 0));
     }
 
     #[test]

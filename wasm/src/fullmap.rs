@@ -4,7 +4,9 @@ use diorama_core::fullmap::MapView;
 use horizon_mod_sdk::PointerKind;
 
 // Largest square of whole 16-texel strips that fits beside the 512² HUD.
-const MAP_SIDE: u32 = 880;
+// Leave room under the host's one-million-texel image cap for the HUD
+// and a screen-sized saved exploration canvas.
+const MAP_SIDE: u32 = 720;
 const LEGEND: &str =
     "Drag pan - Wheel zoom - C centre - Right-click add waypoint - W waypoints - Esc close";
 const LEGEND_SPLIT: [&str; 2] = [
@@ -44,6 +46,21 @@ pub struct FullMap {
     drawn: Option<Drawn>,
     fill_frames: u32,
     filled: bool,
+    saved_image: Option<canvas::Image>,
+    saved_view: Option<(MapView, (f32, f32))>,
+    saved_size: (u32, u32),
+    saved_rgba: Vec<u8>,
+    saved_queue: Vec<([u8; 16], i32, i32, u32)>,
+    saved_job: Option<SavedPaint>,
+}
+
+struct SavedPaint {
+    id: ([u8; 16], i32, i32, u32),
+    rgba: Vec<u8>,
+    row: u32,
+    end: u32,
+    x0: u32,
+    x1: u32,
 }
 
 #[derive(PartialEq)]
@@ -176,6 +193,12 @@ impl Diorama {
             drawn: None,
             fill_frames: 0,
             filled: false,
+            saved_image: None,
+            saved_view: None,
+            saved_size: (0, 0),
+            saved_rgba: Vec::new(),
+            saved_queue: Vec::new(),
+            saved_job: None,
         });
         if let Some(r) = &self.ready {
             self.fullmap
@@ -194,6 +217,10 @@ impl Diorama {
         let Some(f) = self.fullmap.take() else { return };
         canvas::close_canvas_screen();
         canvas::drop_image(f.image);
+        if let Some(image) = f.saved_image {
+            canvas::drop_image(image);
+        }
+        self.saved.flush();
         let centre = game::get_player()
             .map(|p| ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4))
             .or(self.player_chunk);
@@ -244,6 +271,7 @@ impl Diorama {
     }
 
     pub fn fullmap_frame(&mut self, p: &game::Player) {
+        self.saved_fullmap_step(p);
         let Some(mut f) = self.fullmap.take() else {
             return;
         };
@@ -265,9 +293,15 @@ impl Diorama {
         let watch = self.watch.take();
         let centre = ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4);
         let version = self.painter.looks.version;
-        let (busy, chunks, uploaded) = self.bake_frame(centre, f.view.centre_u, false, true);
+        let (busy, chunks, uploaded) = self.bake_frame(centre, f.view.centre_u, false, true, p);
         f.fill_frames += 1;
-        if !f.filled && self.pending.is_empty() && self.ready.is_none() && self.rebuild.is_none() {
+        if !f.filled
+            && f.saved_queue.is_empty()
+            && f.saved_job.is_none()
+            && self.pending.is_empty()
+            && self.ready.is_none()
+            && self.rebuild.is_none()
+        {
             let a = self.mosaic.anchor();
             if let Some((src, _)) = f.view.src_dst(
                 (a.0 as f64, a.1 as f64),
@@ -313,6 +347,117 @@ impl Diorama {
             canvas::work_left(),
         );
         self.account(busy || uploaded > 0, chunks, uploaded);
+    }
+
+    /// Composite saved tiles into one canvas covering the whole camera view.
+    /// At most eight rows are resampled per frame, then uploaded as a native
+    /// whole-width slice. This also stays within the host's image texel cap.
+    fn saved_fullmap_step(&mut self, p: &game::Player) {
+        let Some(f) = &mut self.fullmap else {
+            return;
+        };
+        let gui = render::gui_size();
+        if f.saved_view != Some((f.view, gui)) {
+            if let Some(image) = f.saved_image.take() {
+                canvas::drop_image(image);
+            }
+            f.saved_size = (
+                gui.0.clamp(1.0, 512.0) as u32,
+                gui.1.clamp(1.0, 512.0) as u32,
+            );
+            f.saved_image = canvas::create_image(f.saved_size.0, f.saved_size.1).ok();
+            f.saved_rgba
+                .resize((f.saved_size.0 * f.saved_size.1 * 4) as usize, 0);
+            f.saved_rgba.fill(0);
+            f.saved_view = Some((f.view, gui));
+            f.saved_queue = self
+                .saved
+                .visible(p, f.cut, self.settings.flat_style(), &f.view, gui);
+            f.saved_queue.reverse();
+            f.saved_job = None;
+            f.drawn = None;
+        }
+        let Some(image) = f.saved_image else {
+            return;
+        };
+        let side = diorama_core::explored::SIDE;
+        if f.saved_job.is_none() {
+            if let Some(id) = f.saved_queue.pop() {
+                let a = f.view.map_to_screen(
+                    (
+                        id.1 as f64 * side as f64 / id.3 as f64,
+                        id.2 as f64 * side as f64 / id.3 as f64,
+                    ),
+                    gui,
+                );
+                let b = f.view.map_to_screen(
+                    (
+                        (id.1 + 1) as f64 * side as f64 / id.3 as f64,
+                        (id.2 + 1) as f64 * side as f64 / id.3 as f64,
+                    ),
+                    gui,
+                );
+                let x = |n: f32| {
+                    (n / gui.0 * f.saved_size.0 as f32)
+                        .ceil()
+                        .clamp(0.0, f.saved_size.0 as f32) as u32
+                };
+                let y = |n: f32| {
+                    (n / gui.1 * f.saved_size.1 as f32)
+                        .ceil()
+                        .clamp(0.0, f.saved_size.1 as f32) as u32
+                };
+                if let Some(rgba) = self.saved.tile(id) {
+                    f.saved_job = Some(SavedPaint {
+                        id,
+                        rgba: rgba.to_vec(),
+                        row: y(a.1),
+                        end: y(b.1),
+                        x0: x(a.0),
+                        x1: x(b.0),
+                    });
+                }
+            }
+        }
+        let Some(mut job) = f.saved_job.take() else {
+            return;
+        };
+        let end = (job.row + 8).min(job.end);
+        let row_bytes = f.saved_size.0 as usize * 4;
+        for j in job.row..end {
+            for i in job.x0..job.x1 {
+                let uv = f.view.screen_to_map(
+                    (
+                        i as f32 / f.saved_size.0 as f32 * gui.0,
+                        j as f32 / f.saved_size.1 as f32 * gui.1,
+                    ),
+                    gui,
+                );
+                let x = (uv.0 * job.id.3 as f64).floor() as i32 - job.id.1 * side as i32;
+                let y = (uv.1 * job.id.3 as f64).floor() as i32 - job.id.2 * side as i32;
+                if !(0..side as i32).contains(&x) || !(0..side as i32).contains(&y) {
+                    continue;
+                }
+                let src = (y as usize * side as usize + x as usize) * 4;
+                let at = j as usize * row_bytes + i as usize * 4;
+                f.saved_rgba[at..at + 4].copy_from_slice(&job.rgba[src..src + 4]);
+            }
+        }
+        if end > job.row {
+            let _ = canvas::update_image(
+                image,
+                0,
+                job.row,
+                f.saved_size.0,
+                end - job.row,
+                &f.saved_rgba[job.row as usize * row_bytes..end as usize * row_bytes],
+            );
+            f.drawn = None;
+        }
+        job.row = end;
+        if end < job.end {
+            f.saved_job = Some(job);
+        }
     }
 
     fn render_fullmap(&mut self, p: &game::Player, force: bool) {
@@ -366,6 +511,25 @@ impl Diorama {
             })
         };
         let mut out = vec![fill(0.0, 0.0, gui.0, gui.1, 0xFF28_2828)];
+        if let Some(image) = f.saved_image {
+            out.push(Shape::Image(ImageShape {
+                image,
+                src: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: f.saved_size.0 as f32,
+                    h: f.saved_size.1 as f32,
+                },
+                dst: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: gui.0,
+                    h: gui.1,
+                },
+                tint: 0xFFFF_FFFF,
+                round: false,
+            }));
+        }
         let a = f.mosaic.anchor();
         if let Some((src, dst)) = f.view.src_dst(
             (a.0 as f64, a.1 as f64),
