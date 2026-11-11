@@ -42,9 +42,10 @@ use horizon_mod_sdk::{
 
 /// The mosaic's side in texels: 256 blocks across at 2 texels per block.
 const SIDE: u32 = 512;
-/// Heap grown at start: the mosaic (3.4 MB) and some 700 cached chunks
-/// (about 25 KB each).
-const HEAP_RESERVE: usize = 44 << 20;
+/// Heap grown at start: the mosaic (3.4 MB) and its saved background, some
+/// 700 cached chunks (about 25 KB each) and the explored map's tile cache
+/// (640 tiles of 16 KB): growing later copies the whole heap on Pulley.
+const HEAP_RESERVE: usize = 60 << 20;
 const HEAP_BLOCK: usize = 64 << 10;
 /// Chunks read around the player, and how far cached ones are kept.
 const RADIUS: u32 = 12;
@@ -514,6 +515,14 @@ impl Diorama {
         });
     }
 
+    /// Tells the host which states `prepare` passes, so `prepared-columns`
+    /// lowers the tops as it would (again after every looks rebuild).
+    fn register_see_through(&self) {
+        if let Err(e) = client_world::set_see_through(&self.painter.see_through()) {
+            horizon_mod_sdk::warn(&format!("set-see-through: {e}"));
+        }
+    }
+
     /// Reads the pending chunk the box needs most: one the box shows, else
     /// the nearest `centre`. It waits in `ready` for its own step into the
     /// mosaic. Returns the chunks read.
@@ -524,13 +533,21 @@ impl Diorama {
             return 0;
         };
         self.pending.remove(&key);
-        match client_world::columns(&[key], self.layer(), DEPTH) {
+        // The host lowers the tops past plants, glass and air natively (API
+        // level 23); only the overlay colours of the columns it lowered are
+        // left to do here, so the chunk arrives prepared.
+        match client_world::prepared_columns(&[key], self.layer(), DEPTH) {
             Ok(mut read) => {
-                let chunk = read.pop().flatten().map(|c| {
+                let chunk = read.pop().flatten().map(|p| {
+                    let c = p.columns;
                     let mut chunk = Chunk::new(c.tops, c.states, DEPTH);
                     chunk.water = c.water;
                     chunk.light = c.light;
                     chunk.tints = c.tints;
+                    if !p.skipped_states.is_empty() {
+                        self.painter
+                            .overlays(&mut chunk, &p.skips, &p.skipped_states);
+                    }
                     chunk
                 });
                 if keep_seen && chunk.is_none() && self.mosaic.has(key) {
@@ -538,11 +555,11 @@ impl Diorama {
                 }
                 self.ready = Some(Ready {
                     key,
-                    prepared: chunk.is_none(),
+                    prepared: true,
                     chunk,
                 });
             }
-            Err(e) => horizon_mod_sdk::warn(&format!("columns: {e}")),
+            Err(e) => horizon_mod_sdk::warn(&format!("prepared-columns: {e}")),
         }
         1
     }
@@ -849,15 +866,6 @@ impl Diorama {
                     let before_rows = self.mosaic.stats.rows;
                     self.mosaic.paint_step(&self.painter, u, rows);
                     let painted = self.mosaic.stats.rows - before_rows;
-                    if painted > 0 {
-                        self.saved.capture(
-                            &self.mosaic,
-                            player,
-                            self.cut,
-                            self.settings.flat_style(),
-                            self.clock,
-                        );
-                    }
                     self.paint_rate
                         .after(spent(), painted as u32, canvas::work_left());
                     self.step_cost(3, spent(), painted);
@@ -874,11 +882,26 @@ impl Diorama {
                         UPLOAD_PIECE.min(UPLOAD_BYTES - focus_uploaded) as u32,
                     );
                     let (image, outline) = (self.image, self.painter.style.outline);
+                    let (anchor, tpb) = (self.mosaic.anchor(), self.mosaic.texels_per_block());
+                    let (cut, flat, now) = (self.cut, self.settings.flat_style(), self.clock);
+                    let saved = &mut self.saved;
                     let n = self
                         .mosaic
                         .take_focus_upload(piece, outline, |x, y, w, h, rgba| {
                             if let Err(e) = canvas::update_image(image, x, y, w, h, rgba) {
                                 horizon_mod_sdk::warn(&format!("update-image: {e}"));
+                            }
+                            if !keep_seen {
+                                saved.capture_rect(
+                                    anchor,
+                                    tpb,
+                                    (x, y, w, h),
+                                    rgba,
+                                    player,
+                                    cut,
+                                    flat,
+                                    now,
+                                );
                             }
                         });
                     self.upload_rate
@@ -918,9 +941,17 @@ impl Diorama {
                 self.mosaic.side() * 4,
                 UPLOAD_PIECE.min(UPLOAD_BYTES - uploaded) as u32,
             );
+            let (anchor, tpb) = (self.mosaic.anchor(), self.mosaic.texels_per_block());
+            let (cut, flat, now) = (self.cut, self.settings.flat_style(), self.clock);
+            let saved = &mut self.saved;
             let n = self.mosaic.take_upload(piece, outline, |x, y, w, h, rgba| {
                 if let Err(e) = canvas::update_image(image, x, y, w, h, rgba) {
                     failed = Some(e);
+                }
+                // The fullscreen map (keep_seen) shows what the minimap saves;
+                // it does not save a second, coarser copy of its own.
+                if !keep_seen {
+                    saved.capture_rect(anchor, tpb, (x, y, w, h), rgba, player, cut, flat, now);
                 }
             });
             if n == 0 {
@@ -987,6 +1018,7 @@ impl Diorama {
             missing
         ));
         self.painter.looks = looks;
+        self.register_see_through();
         self.blocks = r.table.blocks;
         self.state_block = r.table.state_block;
         self.mosaic.forget_shades();
@@ -1308,6 +1340,7 @@ impl Mod for Diorama {
             step_units: [0; 5],
         };
         state.page();
+        state.register_see_through();
         Ok((
             state,
             Registration::new()

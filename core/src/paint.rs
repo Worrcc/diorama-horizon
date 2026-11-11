@@ -108,6 +108,59 @@ impl Painter {
         self.face_cache.fill(Cell::new(None));
     }
 
+    /// The states [`Painter::prepare`] passes at a column's top (plants,
+    /// glass, air): the host's `set-see-through` set, so it can lower the
+    /// tops natively (`prepared-columns`, API level 23).
+    pub fn see_through(&self) -> Vec<u32> {
+        (0..self.looks.looks.len() as u32)
+            .filter(|&s| {
+                matches!(
+                    self.looks.get(s).kind,
+                    Kind::Plant | Kind::Glass | Kind::Air
+                )
+            })
+            .collect()
+    }
+
+    /// The rest of [`Painter::prepare`] for a chunk the host already lowered
+    /// (`prepared-columns`): what the `skips[col]` passed states, given top
+    /// down and concatenated in `skipped`, lay over each column, in
+    /// `chunk.over`. Same arithmetic as `prepare`, so the same pixels.
+    pub fn overlays(&self, chunk: &mut Chunk, skips: &[u8], skipped: &[u32]) {
+        let mut over: Vec<[f32; 4]> = Vec::new();
+        let mut at = 0;
+        for (col, &k) in skips.iter().enumerate().take(256) {
+            let k = usize::from(k);
+            if k == 0 {
+                continue;
+            }
+            let Some(states) = skipped.get(at..at + k) else {
+                break;
+            };
+            at += k;
+            let tints = chunk.tints_at(col);
+            let (mut rgb, mut through) = ([0.0f32; 3], 1.0f32);
+            for &state in states {
+                let look = self.looks.get(state);
+                let Some(w) = look.kind.overlay() else {
+                    continue;
+                };
+                let a = albedo(&self.tables, &look, true, &tints);
+                for c in 0..3 {
+                    rgb[c] += through * w * a[c];
+                }
+                through *= 1.0 - w;
+            }
+            if through < 1.0 {
+                if over.is_empty() {
+                    over = vec![CLEAR; 256];
+                }
+                over[col] = [rgb[0], rgb[1], rgb[2], through];
+            }
+        }
+        chunk.over = over;
+    }
+
     /// Lowers each column's top past plants, glass and air to the first block
     /// a ray stops at or enters as water, as Diorama's ray passes them
     /// (TileBaker.java:1049-1059), and keeps what they lay over it in
@@ -472,6 +525,57 @@ mod tests {
         assert_eq!(all.tops[0], 70);
         assert_eq!(c.tops[1], 65);
         assert!(all.over.is_empty());
+    }
+
+    /// What the host's `prepared-columns` does, from its documented rule.
+    #[allow(clippy::needless_range_loop)]
+    fn host_prepare(c: &mut Chunk, see: &[u32]) -> (Vec<u8>, Vec<u32>) {
+        let d = usize::from(c.depth.max(1));
+        let (mut skips, mut skipped) = (vec![0u8; 256], Vec::new());
+        for col in 0..256 {
+            if c.tops[col] == NO_TOP {
+                continue;
+            }
+            let Some(k) = (0..d).find(|&k| !see.contains(&c.state(col, k as i32))) else {
+                continue;
+            };
+            if k == 0 {
+                continue;
+            }
+            let row = &mut c.states[col * d..(col + 1) * d];
+            skipped.extend_from_slice(&row[..k]);
+            row.copy_within(k.., 0);
+            let last = row[d - k - 1];
+            row[d - k..].fill(last);
+            c.tops[col] -= k as i16;
+            skips[col] = k as u8;
+        }
+        (skips, skipped)
+    }
+
+    #[test]
+    fn host_prepared_columns_paint_as_prepare_does() {
+        let p = painter();
+        let see = p.see_through();
+        for (states, top) in [
+            (&[4, 1][..], 65),
+            (&[5, 0, 0, 2][..], 70),
+            (&[5; 8][..], 70),
+            (&[1][..], 64),
+            (&[4, 5, 4, 0, 3][..], 80),
+        ] {
+            let mut a = column(states, top);
+            // Column 1: a plant over glass over grass, to check that the
+            // skipped states of several columns line up.
+            a.states[8..11].copy_from_slice(&[4, 5, 1]);
+            let mut b = a.clone();
+            p.prepare(&mut a);
+            let (skips, skipped) = host_prepare(&mut b, &see);
+            p.overlays(&mut b, &skips, &skipped);
+            assert_eq!(a.tops, b.tops, "{states:?}");
+            assert_eq!(a.states, b.states, "{states:?}");
+            assert_eq!(a.over, b.over, "{states:?}");
+        }
     }
 
     #[test]

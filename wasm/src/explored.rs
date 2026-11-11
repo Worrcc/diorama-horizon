@@ -7,7 +7,9 @@ const ROOT: &str = "map_index_v1";
 const PAGES: usize = 64;
 const LIMIT: u64 = 900 << 20;
 const KEY_LIMIT: usize = 60_000;
-const CACHE: usize = 256;
+/// Tiles kept in memory (16 KiB each): the minimap's and the fullscreen
+/// map's together, so neither evicts the other's.
+const CACHE: usize = 640;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
     ns: [u8; 16],
@@ -41,6 +43,9 @@ struct Tile {
     generation: u64,
     used: u64,
     changed: f64,
+    /// Made blank by a capture while its saved copy was still on disk: that
+    /// copy is merged under it (in `step`, one a frame) before it is saved.
+    base_pending: bool,
 }
 struct Saving {
     key: Key,
@@ -116,6 +121,8 @@ pub struct Saved {
     /// Restores are restarted after a shift, world/layer or detail change.
     anchor: Option<([u8; 16], i32, i32, u32)>,
     restore: Vec<(Key, u32)>,
+    /// Captured tiles waiting for their saved copy to merge under them.
+    merges: BTreeSet<Key>,
     restored: bool,
     hold: bool,
     pub written: u64,
@@ -141,6 +148,7 @@ impl Saved {
             force: false,
             anchor: None,
             restore: Vec::new(),
+            merges: BTreeSet::new(),
             restored: false,
             hold: false,
             written: 0,
@@ -238,7 +246,9 @@ impl Saved {
         let oldest = self
             .tiles
             .iter()
-            .filter(|(k, t)| !t.dirty && self.saving.as_ref().is_none_or(|s| s.key != **k))
+            .filter(|(k, t)| {
+                !t.dirty && !t.base_pending && self.saving.as_ref().is_none_or(|s| s.key != **k)
+            })
             .min_by_key(|(_, t)| t.used)
             .map(|(k, _)| *k);
         if let Some(key) = oldest {
@@ -253,6 +263,9 @@ impl Saved {
         self.serial += 1;
         if let Some(t) = self.tiles.get_mut(&key) {
             t.used = self.serial;
+            if t.base_pending {
+                self.merge(key);
+            }
             return true;
         }
         if !self.room() {
@@ -274,6 +287,7 @@ impl Saved {
                 generation: 0,
                 used: self.serial,
                 changed: 0.0,
+                base_pending: false,
             },
         );
         self.touch(key);
@@ -383,47 +397,106 @@ impl Saved {
     pub fn has_restored(&self) -> bool {
         self.restored
     }
-    /// Called for the painted neighbourhood only. Copies rows natively, without
-    /// walking texels at upload time. Capture survives recentring and cache loss.
-    pub fn capture(
+    /// A tile to capture into, without reading the disk mid-upload: a tile
+    /// saved earlier but not in memory starts blank and its saved copy is
+    /// merged under it later (`step`).
+    fn cached_for_capture(&mut self, key: Key) -> bool {
+        self.serial += 1;
+        if let Some(t) = self.tiles.get_mut(&key) {
+            t.used = self.serial;
+            return true;
+        }
+        if !self.room() {
+            return false;
+        }
+        let on_disk = self.pages[key.page()].contains_key(&key);
+        self.tiles.insert(
+            key,
+            Tile {
+                rgba: vec![0; BYTES],
+                dirty: false,
+                generation: 0,
+                used: self.serial,
+                changed: 0.0,
+                base_pending: on_disk,
+            },
+        );
+        if on_disk {
+            self.merges.insert(key);
+        }
+        self.touch(key);
+        true
+    }
+
+    /// Lays a tile's saved copy under what was captured into it since.
+    fn merge(&mut self, key: Key) {
+        self.merges.remove(&key);
+        let saved = storage::get(&key.name()).and_then(|v| codec::decode(&v));
+        let Some(t) = self.tiles.get_mut(&key) else {
+            return;
+        };
+        t.base_pending = false;
+        let Some(saved) = saved.filter(|v| v.len() == t.rgba.len()) else {
+            return;
+        };
+        for (px, old) in t
+            .rgba
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(saved.as_chunks::<4>().0)
+        {
+            if px[3] == 0 {
+                *px = *old;
+            }
+        }
+    }
+
+    /// Saves texels as they are uploaded (outlines and the saved background
+    /// already in): `rgba` is a `w` x `h` rect at texel `(x, y)` of a mosaic
+    /// anchored at block `anchor` with `tpb` texels per block. No texel is
+    /// computed twice: what the upload built is what is kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_rect(
         &mut self,
-        m: &Mosaic,
+        anchor: (i32, i32),
+        tpb: u32,
+        (x, y, w, h): (u32, u32, u32, u32),
+        rgba: &[u8],
         p: &game::Player,
         cut: Option<i32>,
         flat: bool,
         now: f64,
     ) {
-        if self.stopped {
+        if self.stopped || rgba.len() < (w * h * 4) as usize {
             return;
         }
-        let tpb = m.texels_per_block();
         let Some(ns) = self.namespace(p, cut, tpb, flat) else {
             return;
         };
-        let (u, v) = m.anchor();
-        let (x0, y0, x1, y1) = m.last_painted();
-        let (ox, oy) = (u * tpb as i32, v * tpb as i32);
-        for y in y0..y1 {
-            let wy = oy + y as i32;
-            let mut x = x0;
-            while x < x1 {
-                let wx = ox + x as i32;
+        let (ox, oy) = (anchor.0 * tpb as i32, anchor.1 * tpb as i32);
+        let row_bytes = w as usize * 4;
+        for r in 0..h {
+            let wy = oy + (y + r) as i32;
+            let line = &rgba[r as usize * row_bytes..(r as usize + 1) * row_bytes];
+            let mut i = 0u32;
+            while i < w {
+                let wx = ox + (x + i) as i32;
                 let key = Key {
                     ns,
                     x: wx.div_euclid(TILE as i32),
                     y: wy.div_euclid(TILE as i32),
                 };
                 let tx = wx.rem_euclid(TILE as i32) as usize;
-                let n = (x1 - x).min(TILE - tx as u32) as usize * 4;
-                let src = ((y * m.side() + x) * 4) as usize;
-                let row = &m.display_pixels()[src..src + n];
-                if (self.tiles.contains_key(&key) || row.iter().any(|&v| v != 0))
-                    && self.load(key, true)
+                let n = (w - i).min(TILE - tx as u32) as usize * 4;
+                let src = &line[i as usize * 4..i as usize * 4 + n];
+                if (self.tiles.contains_key(&key) || src.iter().any(|&v| v != 0))
+                    && self.cached_for_capture(key)
                 {
                     let t = self.tiles.get_mut(&key).unwrap();
                     let at = (wy.rem_euclid(TILE as i32) as usize * TILE as usize + tx) * 4;
-                    if t.rgba[at..at + n] != *row {
-                        t.rgba[at..at + n].copy_from_slice(row);
+                    if t.rgba[at..at + n] != *src {
+                        t.rgba[at..at + n].copy_from_slice(src);
                         if !t.dirty {
                             self.dirty_count += 1;
                             t.changed = now;
@@ -432,7 +505,7 @@ impl Saved {
                         t.generation += 1;
                     }
                 }
-                x += n as u32 / 4;
+                i += n as u32 / 4;
             }
         }
     }
@@ -463,6 +536,10 @@ impl Saved {
                 self.index_dirty.insert(key.page());
                 let _ = used;
             }
+            return;
+        }
+        if let Some(&key) = self.merges.first() {
+            self.merge(key);
             return;
         }
         if let Some(mut job) = self.saving.take() {
@@ -504,6 +581,7 @@ impl Saved {
             .iter()
             .filter(|(_, t)| {
                 t.dirty
+                    && !t.base_pending
                     && (self.force || now - t.changed >= 45.0 || (idle && now - t.changed >= 1.0))
             })
             .min_by(|(_, a), (_, b)| a.changed.total_cmp(&b.changed))
