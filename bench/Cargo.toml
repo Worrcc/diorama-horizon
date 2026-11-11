@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 # The Horizon-iOS fork's mod runtime, branch claude/mod-canvas-api, as for the SDK.
-horizon-mods = { path = "../../iaf-swarm/mod-canvas-api/crates/horizon-mods", features = ["runtime"] }
+horizon-mods = { path = "../../iaf-swarm/mousetweaks-api/crates/horizon-mods", features = ["runtime"] }
 log = { version = "0.4", features = ["std"] }
 # `--native`: the same bake run natively, to profile it.
 diorama-core = { path = "../core" }

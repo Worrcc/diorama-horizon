@@ -107,6 +107,15 @@ pub fn may_upload(left: u64) -> bool {
     left > UPLOAD_RESERVE
 }
 
+/// A whole number of strip rows that fits, with one row allowed as the
+/// frame's first step even when its learnt cost exceeds the allowance.
+pub fn upload_piece(rate: &Rate, left: u64, first: bool, row_bytes: u32, cap: u32) -> usize {
+    let row = row_bytes.max(1);
+    let fits = rate.units(left, UPLOAD_RESERVE, cap.max(1));
+    let fits = if first { fits.max(row) } else { fits };
+    (fits.min(cap) / row * row) as usize
+}
+
 /// How much work one unit of a step (a row painted, a byte uploaded) costs,
 /// learnt from the steps taken, so a step is sized to the work left: on
 /// Pulley (iOS) a unit costs some 30 times what it does compiled, and a
@@ -149,6 +158,10 @@ impl Rate {
     }
     pub fn per_unit(&self) -> f64 {
         self.per_unit
+    }
+    /// Keep the learnt time per unit when work units acquire a new budget.
+    pub fn rescale(&mut self, old_grant: u32, new_grant: u32) {
+        self.per_unit *= f64::from(old_grant) / f64::from(new_grant.max(1));
     }
     /// A step of `units` units ran the meter to 0: it cost `work` or more,
     /// by how much the meter cannot say. The guess doubles (at least to
@@ -553,6 +566,39 @@ mod tests {
         }
         assert_eq!(slow_engine(&compiled), Some(false));
         assert_eq!(slow_engine(&pulley), Some(true));
+    }
+
+    #[test]
+    fn rates_keep_the_same_time_when_the_grant_changes() {
+        let mut rate = Rate::new(600_000.0);
+        rate.observe(600_000, 1);
+        let time = micros(rate.of(1), 300);
+        for (old, new) in [(300, 500), (500, 4000), (4000, 300)] {
+            rate.rescale(old, new);
+            assert_eq!(micros(rate.of(1), new), time);
+            assert_eq!(rate.seen(), 1);
+        }
+    }
+
+    #[test]
+    fn expensive_uploads_progress_without_exceeding_the_frame_byte_cap() {
+        let rate = Rate::new(4.0 * WORK_SCALE as f64);
+        assert_eq!(upload_piece(&rate, 0, true, 64, 8192), 64);
+        assert_eq!(upload_piece(&rate, WORK_SCALE, false, 64, 8192), 0);
+        assert_eq!(upload_piece(&rate, WORK_SCALE, true, 64, 32), 0);
+        let cheap = Rate::new(0.001);
+        let mut uploaded = 0;
+        let cap = 1 << 20;
+        while uploaded < cap {
+            uploaded += upload_piece(
+                &cheap,
+                WORK_SCALE,
+                false,
+                64,
+                (cap - uploaded).min(8192) as u32,
+            );
+        }
+        assert_eq!(uploaded, cap);
     }
 
     #[test]

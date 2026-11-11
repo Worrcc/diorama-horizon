@@ -30,12 +30,7 @@ impl Diorama {
             self.settings.corner(),
             self.settings.offset(),
         );
-        let r = layout::place(
-            corner,
-            offset,
-            self.box_size,
-            render::gui_size(),
-        );
+        let r = layout::place(corner, offset, self.box_size, render::gui_size());
         self.moving = Some(MoveScreen {
             at: (r.x, r.y),
             drag: None,

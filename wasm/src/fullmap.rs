@@ -42,6 +42,8 @@ pub struct FullMap {
     drag: Option<(f32, f32)>,
     selected: Option<String>,
     drawn: Option<Drawn>,
+    fill_frames: u32,
+    filled: bool,
 }
 
 #[derive(PartialEq)]
@@ -52,9 +54,15 @@ struct Drawn {
     player: (f64, f64, f64, f32),
     rev: u32,
     selected: Option<String>,
+    cursor: (f32, f32),
 }
 
 impl FullMap {
+    pub(super) fn invalidate(&mut self) {
+        self.mosaic.forget_shades();
+        self.pending.extend(self.mosaic.keys());
+        self.ready = None;
+    }
     fn touch_controls(&self) -> Vec<(layout::TouchButton, layout::Rect)> {
         layout::touch_buttons(
             render::gui_size(),
@@ -142,6 +150,10 @@ impl Diorama {
         let mut mosaic = Mosaic::with_texels(projection, MAP_SIDE, 1);
         mosaic.outline_depth = self.mosaic.outline_depth;
         mosaic.recentre(uv.0, uv.1);
+        mosaic.import_chunks(self.mosaic.export_chunks(|k| {
+            !self.pending.contains(&k) && self.ready.as_ref().is_none_or(|r| r.key != k)
+        }));
+        self.shared_updates.clear();
         let y_range = client_world::dimension().map_or((-64, 319), |d| {
             (
                 d.min_y,
@@ -151,9 +163,9 @@ impl Diorama {
         self.fullmap = Some(FullMap {
             mosaic,
             image,
-            pending: BTreeSet::new(),
+            pending: self.pending.clone(),
             ready: None,
-            since: 0,
+            since: self.since,
             cut: self.cut,
             dimension: p.dimension.clone(),
             y_range,
@@ -162,9 +174,19 @@ impl Diorama {
             drag: None,
             selected: None,
             drawn: None,
+            fill_frames: 0,
+            filled: false,
         });
+        if let Some(r) = &self.ready {
+            self.fullmap
+                .as_mut()
+                .expect("just opened")
+                .pending
+                .insert(r.key);
+        }
         self.fullmap_tick();
         canvas::open_canvas_screen("Diorama map", &[]);
+        self.update_budget();
         self.render_fullmap(&p, true);
     }
 
@@ -172,14 +194,35 @@ impl Diorama {
         let Some(f) = self.fullmap.take() else { return };
         canvas::close_canvas_screen();
         canvas::drop_image(f.image);
-        // Re-read HUD chunks in case they changed or packs reloaded while paused.
-        self.mosaic.forget_shades();
-        self.pending.extend(self.mosaic.keys());
-        if let Some(r) = self.ready.take() {
-            self.pending.insert(r.key);
+        let centre = game::get_player()
+            .map(|p| ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4))
+            .or(self.player_chunk);
+        if let Some(pc) = centre {
+            self.pending
+                .retain(|k| (k.0 - pc.0).abs().max((k.1 - pc.1).abs()) <= FORGET);
+            let snapshot = f.mosaic.into_chunks(|k| {
+                self.shared_updates.contains(&k)
+                    && !f.pending.contains(&k)
+                    && f.ready.as_ref().is_none_or(|r| r.key != k)
+                    && (k.0 - pc.0).abs().max((k.1 - pc.1).abs()) <= FORGET
+            });
+            for key in self.mosaic.import_chunks(snapshot) {
+                self.pending.remove(&key);
+                if self.ready.as_ref().is_some_and(|r| r.key == key) {
+                    self.ready = None;
+                }
+            }
+            self.mosaic.forget_far(pc, FORGET);
         }
-        self.since = 0;
+        self.shared_updates.clear();
         self.shown = None;
+        self.fill = Some(Fill {
+            started: self.clock,
+            frames: 0,
+            visible: false,
+            cost: Cost::default(),
+        });
+        self.update_budget();
     }
 
     pub fn fullmap_tick(&mut self) {
@@ -221,7 +264,31 @@ impl Diorama {
         let fill = self.fill.take();
         let watch = self.watch.take();
         let centre = ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4);
+        let version = self.painter.looks.version;
         let (busy, chunks, uploaded) = self.bake_frame(centre, f.view.centre_u, false, true);
+        f.fill_frames += 1;
+        if !f.filled && self.pending.is_empty() && self.ready.is_none() && self.rebuild.is_none() {
+            let a = self.mosaic.anchor();
+            if let Some((src, _)) = f.view.src_dst(
+                (a.0 as f64, a.1 as f64),
+                self.mosaic.texels_per_block() as f32,
+                (MAP_SIDE, MAP_SIDE),
+                render::gui_size(),
+            ) {
+                if self.mosaic.window_done(
+                    src.x as u32,
+                    src.y as u32,
+                    (src.x + src.w).ceil() as u32,
+                    (src.y + src.h).ceil() as u32,
+                ) {
+                    f.filled = true;
+                    horizon_mod_sdk::info(&format!(
+                        "fullmap fill: visible, {} frames",
+                        f.fill_frames
+                    ));
+                }
+            }
+        }
 
         self.fill = fill;
         self.watch = watch;
@@ -232,6 +299,11 @@ impl Diorama {
         std::mem::swap(&mut self.pending, &mut f.pending);
         std::mem::swap(&mut self.image, &mut f.image);
         std::mem::swap(&mut self.mosaic, &mut f.mosaic);
+        if version != self.painter.looks.version {
+            self.mosaic.forget_shades();
+            self.pending.extend(self.mosaic.keys());
+            self.ready = None;
+        }
         self.fullmap = Some(f);
         let before = canvas::work_left();
         self.render_fullmap(p, uploaded > 0);
@@ -253,6 +325,18 @@ impl Diorama {
         } else {
             10.0 + 10.0 * legend.len() as f32
         };
+        if !force
+            && f.drawn.as_ref().is_some_and(|d| {
+                d.view == f.view
+                    && d.gui == gui
+                    && d.cursor == f.cursor
+                    && d.player == (p.x, p.y, p.z, p.yaw)
+                    && d.rev == self.rev
+                    && d.selected == f.selected
+            })
+        {
+            return;
+        }
         let block = f.block(bottom_bar);
         let key = Drawn {
             view: f.view,
@@ -261,6 +345,7 @@ impl Diorama {
             player: (p.x, p.y, p.z, p.yaw),
             rev: self.rev,
             selected: f.selected.clone(),
+            cursor: f.cursor,
         };
         if !force && f.drawn.as_ref() == Some(&key) {
             return;
@@ -506,11 +591,7 @@ impl Diorama {
                 return;
             }
         }
-        let bottom_bar = if self.touch {
-            28.0
-        } else {
-            bottom_bar
-        };
+        let bottom_bar = if self.touch { 28.0 } else { bottom_bar };
         match kind {
             PointerKind::Down if button == 1 => {
                 if let Some(at) = f.block(bottom_bar) {

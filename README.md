@@ -1,9 +1,10 @@
 **Unofficial** port of Diorama by Dara Adedeji (github.com/SunkenInTime/minecraft-orthogonal-map, Modrinth `diorama-map`) to Horizon. Not affiliated with or endorsed by the Diorama author or Mojang.
 
-Status: v3. The map bakes the loaded chunks (top and south faces, nearest face per texel) into a 512 x 512 mosaic
+Status: v0.3.2. The map bakes the loaded chunks (top and south faces, nearest face per texel) into a 512 x 512 mosaic
 around the player, in Diorama's colours: each block's textures from the loaded resource packs averaged at run
 time, biome tints, clear water by depth, the default style's light, height shade, grade and outlines. A resource
 pack change recolours the map after the reload. `/diorama colour <block>` shows a block's averaged colours.
+`/diorama profile` logs metered bake step averages since its previous call.
 
 M6 adds waypoints: **B** adds one where you stand, **U** opens the list (teleport, colour, hide, delete), and
 `/dwp add|del|rename|color|list|hide|show|tp` does the rest (there is no text field, so names go through
@@ -46,7 +47,9 @@ The mod asks for the capabilities `game-read`, `render`, `world-read`, `input`, 
 - On iOS (Pulley interpreter) the minimap uses one texel per block in its 512 × 512 image.
 - The fullscreen map is an 880 × 880 image at one texel per block, fixed around where it opened. Panning beyond
   it shows unknown grey; closing drops its image and resumes the minimap.
-- Sprint flying can exceed the 0.3 ms per-frame budget while the map fills in.
+- The mod requests 300 µs per frame when idle, 500 µs while filling the minimap, and 4000 µs while its
+  fullscreen map is open. The host may clamp these grants; individual steps can exceed the soft budget.
+- The fullscreen map copies the minimap’s prepared chunks and returns new reads on close. The extra cache is temporary.
 - The test on a real phone is still pending.
 
 ## Install

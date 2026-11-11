@@ -9,12 +9,14 @@
 //! ```
 //!
 //! Scenarios, at 60 frames and 20 ticks a second: joining (until the map is
-//! filled), standing still, `/diorama refill`, and flying east at creative
+//! filled), standing still, fullscreen open/close, `/diorama refill`, and flying east at creative
 //! sprint-flight speed (21.6 blocks a second) for 60 s. Each prints the frame
 //! call's average, its 99th percentile and its worst, how many went over
 //! 0.3 ms and 0.5 ms, and the fill-in frames the mod logs. Nothing here is
 //! taken from Minecraft or Diorama: the blocks are named, their textures are
 //! flat colours with a little noise.
+//! `BENCH_VERIFY=1` also checks shared changes and a pack reload against fresh
+//! HUD bakes, byte for byte, after the timed scenarios.
 use horizon_mods::{
     state_flags, BlockFace, BlockTable, ChunkColumns, ClientDimension, ClientTexture,
     ClientWorldView, Clock, ColumnLayer, FaceTint, Mods, Player, Runs, Snapshot, Status, NO_SPRITE,
@@ -28,6 +30,8 @@ use std::{
 
 const RENDER_DISTANCE: i32 = 12;
 const FPS: f64 = 60.0;
+// Long enough to measure the old Pulley bake rather than censor it at 100 s.
+const FILL_CAP: u32 = 24_000;
 const SPRINT_FLIGHT: f64 = 21.6;
 
 /// Block states: name, flags, top sprite and tint, side sprite and tint.
@@ -138,7 +142,7 @@ fn tree_near(x: i32, z: i32) -> Option<(i32, i32, i32)> {
     for dz in -2..=2 {
         for dx in -2..=2 {
             let (tx, tz) = (x + dx, z + dz);
-            if tx.rem_euclid(9) == 4 && tz.rem_euclid(11) == 5 && hash(tx, tz) % 3 != 0 {
+            if tx.rem_euclid(9) == 4 && tz.rem_euclid(11) == 5 && !hash(tx, tz).is_multiple_of(3) {
                 let g = ground(tx, tz);
                 if g > SEA {
                     return Some((tx, tz, g));
@@ -198,6 +202,8 @@ struct Loaded {
     /// flying reads each chunk about 3.7 times (M7's game runs).
     later: BTreeMap<u64, Vec<(i32, i32)>>,
     frame: u64,
+    reads: u64,
+    table_version: u64,
 }
 impl Loaded {
     fn follow(&mut self, centre: (i32, i32), frame: u64) {
@@ -308,7 +314,7 @@ impl ClientWorldView for View {
         };
         let n = STATES.len();
         BlockTable {
-            version: 1,
+            version: self.table_version(),
             blocks: STATES.iter().map(|s| s.0.to_owned()).collect(),
             sprites: SPRITES.iter().map(|s| s.0.to_owned()).collect(),
             state_block: (0..n as u16).collect(),
@@ -329,8 +335,16 @@ impl ClientWorldView for View {
             map_color: vec![0x7f_b238; n],
         }
     }
+    fn table_version(&mut self) -> u64 {
+        1 + self.0.lock().unwrap().table_version
+    }
     fn texture(&mut self, name: &str) -> Option<ClientTexture> {
         let &(_, rgb, holes) = SPRITES.iter().find(|s| s.0 == name)?;
+        let rgb = if self.0.lock().unwrap().table_version > 0 {
+            rgb ^ 0x1F_1F1F
+        } else {
+            rgb
+        };
         let mut rgba = Vec::with_capacity(16 * 16 * 4);
         for i in 0..256 {
             let h = hash(i, rgb as i32);
@@ -352,7 +366,11 @@ impl ClientWorldView for View {
         layer: ColumnLayer,
         depth: u8,
     ) -> Option<ChunkColumns> {
-        let revision = *self.0.lock().unwrap().revisions.get(&chunk)?;
+        let revision = {
+            let mut l = self.0.lock().unwrap();
+            l.reads += 1;
+            *l.revisions.get(&chunk)?
+        };
         let mut out = self.make(chunk, layer, depth);
         out.revision = revision;
         Some(out)
@@ -405,6 +423,133 @@ struct Times {
 }
 
 impl Bench {
+    fn reads(&self) -> u64 {
+        self.view.0.lock().unwrap().reads
+    }
+
+    fn command(&mut self, command: &str) {
+        self.mods.lend_client_world(Box::new(self.view.clone()));
+        assert!(self.mods.command(command));
+        self.mods.take_client_world();
+    }
+
+    fn hud_pixels(&mut self) -> Vec<u8> {
+        let r = self.mods.canvas_image(0, 1).expect("HUD image");
+        self.mods
+            .take_canvas_uploads(true)
+            .into_iter()
+            .find(|u| (u.x, u.y, u.width, u.height) == (r.x, r.y, r.width, r.height))
+            .expect("whole HUD upload")
+            .rgba
+    }
+
+    fn until_fullmap(&mut self, cap: u32, t: &mut Times) -> Option<String> {
+        let mut from = LINES.lock().unwrap().len();
+        for _ in 0..cap {
+            self.step(t);
+            let lines = LINES.lock().unwrap();
+            if let Some(l) = lines[from..]
+                .iter()
+                .find(|l| l.contains("fullmap fill: visible"))
+            {
+                return Some(l.clone());
+            }
+            from = lines.len();
+        }
+        None
+    }
+
+    fn verify_shared_changes(&mut self) {
+        self.player.x = 8.5;
+        self.command("diorama refill");
+        assert!(self
+            .until_filled(20_000, &mut Times::default(), true)
+            .1
+            .is_some());
+        assert_eq!(self.mods.frame_budget(0), Some(300));
+        let before = self.hud_pixels();
+        self.command("diorama map");
+        assert!(self.until_fullmap(6000, &mut Times::default()).is_some());
+        assert_eq!(self.mods.frame_budget(0), Some(4000));
+        // Raise a chunk under the box after the fullscreen map has filled.
+        for ((chunk, _, _), columns) in self.view.1.lock().unwrap().iter_mut() {
+            if *chunk == (0, 0) {
+                columns.tops.fill(85);
+                columns.states.fill(STONE);
+                columns.water.fill(0);
+            }
+        }
+        {
+            let mut l = self.view.0.lock().unwrap();
+            l.revision += 1;
+            let revision = l.revision;
+            l.revisions.insert((0, 0), revision);
+        }
+        let reads = self.reads();
+        for _ in 0..300 {
+            self.step(&mut Times::default());
+        }
+        assert_eq!(self.reads() - reads, 1, "one changed fullscreen chunk read");
+        self.mods.ui_closed(0);
+        let reads = self.reads();
+        assert!(self
+            .until_filled(20_000, &mut Times::default(), true)
+            .1
+            .is_some());
+        assert_eq!(
+            self.reads(),
+            reads,
+            "HUD must reuse the changed fullscreen chunk"
+        );
+        let changed = self.hud_pixels();
+        assert_ne!(changed, before);
+        self.command("diorama refill");
+        assert!(self
+            .until_filled(20_000, &mut Times::default(), true)
+            .1
+            .is_some());
+        assert_eq!(
+            self.hud_pixels(),
+            changed,
+            "shared change equals a fresh bake"
+        );
+
+        self.command("diorama map");
+        assert!(self.until_fullmap(6000, &mut Times::default()).is_some());
+        let reads = self.reads();
+        self.view.0.lock().unwrap().table_version += 1;
+        for _ in 0..3000 {
+            self.step(&mut Times::default());
+        }
+        assert!(
+            self.reads() - reads >= 625,
+            "reload must re-read the fullscreen cache"
+        );
+        self.mods.ui_closed(0);
+        let reads = self.reads();
+        assert!(self
+            .until_filled(20_000, &mut Times::default(), true)
+            .1
+            .is_some());
+        assert_eq!(
+            self.reads(),
+            reads,
+            "rebuilt fullscreen chunks also serve the HUD"
+        );
+        let reloaded = self.hud_pixels();
+        assert_ne!(reloaded, changed, "pack reload must change colours");
+        self.command("diorama refill");
+        assert!(self
+            .until_filled(20_000, &mut Times::default(), true)
+            .1
+            .is_some());
+        assert_eq!(
+            self.hud_pixels(),
+            reloaded,
+            "shared reload equals a fresh bake"
+        );
+        println!("  verify: shared changes and pack reload match fresh HUD pixels; zero HUD re-reads on close");
+    }
     fn snapshot(&mut self) {
         let centre = (
             (self.player.x.floor() as i32) >> 4,
@@ -427,7 +572,7 @@ impl Bench {
     fn step(&mut self, t: &mut Times) {
         self.snapshot();
         self.mods.lend_client_world(Box::new(self.view.clone()));
-        if self.frame % 3 == 0 {
+        if self.frame.is_multiple_of(3) {
             self.tick += 1;
             let started = Instant::now();
             self.mods.tick(self.tick);
@@ -445,12 +590,18 @@ impl Bench {
         }
     }
     /// Frames until the mod logs that the whole mosaic is filled (at most `cap`).
-    fn until_filled(&mut self, cap: u32, t: &mut Times) -> (Option<String>, Option<String>) {
-        let from = LINES.lock().unwrap().len();
+    fn until_filled(
+        &mut self,
+        cap: u32,
+        t: &mut Times,
+        whole: bool,
+    ) -> (Option<String>, Option<String>) {
+        let mut from = LINES.lock().unwrap().len();
         let (mut visible, mut all) = (None, None);
         for _ in 0..cap {
             self.step(t);
-            for line in &LINES.lock().unwrap()[from..] {
+            let lines = LINES.lock().unwrap();
+            for line in &lines[from..] {
                 if line.contains("fill: the box") {
                     visible.get_or_insert_with(|| line.clone());
                 }
@@ -458,7 +609,8 @@ impl Bench {
                     all.get_or_insert_with(|| line.clone());
                 }
             }
-            if all.is_some() {
+            from = lines.len();
+            if all.is_some() || (!whole && visible.is_some()) {
                 break;
             }
         }
@@ -466,7 +618,16 @@ impl Bench {
     }
 }
 
-fn report(name: &str, t: &Times) {
+fn report(name: &str, t: &Times, b: &mut Bench) {
+    let from = LINES.lock().unwrap().len();
+    b.mods.command("diorama profile");
+    let mut estimates = false;
+    for line in &LINES.lock().unwrap()[from..] {
+        if line.contains("bake steps average:") || line.contains("bake steps cost now:") {
+            println!("  {name} {line}");
+            estimates |= line.contains("bake steps cost now:");
+        }
+    }
     let us = |d: &Duration| d.as_secs_f64() * 1e6;
     let line = |what: &str, v: &[Duration]| {
         if v.is_empty() {
@@ -491,6 +652,16 @@ fn report(name: &str, t: &Times) {
     };
     line("frame", &t.frames);
     line("tick", &t.ticks);
+    let lines = LINES.lock().unwrap();
+    if let Some(l) = lines
+        .iter()
+        .rev()
+        .find(|l| l.contains("bake steps cost now"))
+    {
+        if !estimates {
+            println!("  {name} {l}");
+        }
+    }
 }
 
 /// The fill-in line's frame count, as seconds at 60 fps.
@@ -693,8 +864,8 @@ fn main() {
     println!("  init {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
 
     let mut t = Times::default();
-    let (visible, all) = b.until_filled(6000, &mut t);
-    report("join", &t);
+    let (visible, all) = b.until_filled(FILL_CAP, &mut t, true);
+    report("join", &t, &mut b);
     println!(
         "  join     fill: box {}; all {}",
         fill(&visible),
@@ -705,14 +876,55 @@ fn main() {
     for _ in 0..600 {
         b.step(&mut t);
     }
-    report("stand", &t);
+    report("stand", &t, &mut b);
+
+    b.mods.lend_client_world(Box::new(b.view.clone()));
+    let started = Instant::now();
+    assert!(b.mods.command("diorama map"));
+    println!(
+        "  fullmap-open command {:.0} µs",
+        started.elapsed().as_secs_f64() * 1e6
+    );
+    b.mods.take_client_world();
+    assert!(
+        b.mods.canvas_screen(0).is_some(),
+        "map command must open the canvas screen"
+    );
+    let reads = b.reads();
+    let mut t = Times::default();
+    let visible = b.until_fullmap(FILL_CAP, &mut t);
+    println!(
+        "  fullmap-open chunk reads: {}; granted {} µs",
+        b.reads() - reads,
+        b.mods.frame_budget(0).unwrap()
+    );
+    report("fullmap-open", &t, &mut b);
+    println!(
+        "  fullmap-open fill: visible {} (cap 24000 frames = 400 s)",
+        fill(&visible)
+    );
+
+    b.mods.lend_client_world(Box::new(b.view.clone()));
+    let started = Instant::now();
+    b.mods.ui_closed(0);
+    println!(
+        "  fullmap-close callback {:.0} µs",
+        started.elapsed().as_secs_f64() * 1e6
+    );
+    b.mods.take_client_world();
+    let mut t = Times::default();
+    let reads = b.reads();
+    let (visible, _) = b.until_filled(FILL_CAP, &mut t, false);
+    println!("  fullmap-close chunk reads: {}", b.reads() - reads);
+    report("fullmap-close", &t, &mut b);
+    println!("  fullmap-close fill: box {}", fill(&visible));
 
     b.mods.lend_client_world(Box::new(b.view.clone()));
     b.mods.command("diorama refill");
     b.mods.take_client_world();
     let mut t = Times::default();
-    let (visible, all) = b.until_filled(6000, &mut t);
-    report("refill", &t);
+    let (visible, all) = b.until_filled(FILL_CAP, &mut t, true);
+    report("refill", &t, &mut b);
     println!(
         "  refill   fill: box {}; all {}",
         fill(&visible),
@@ -724,7 +936,7 @@ fn main() {
     // for it first): the cost of the box following the player alone.
     if std::env::var_os("BENCH_SETTLE").is_some() {
         let mut t = Times::default();
-        let (_, all) = b.until_filled(12_000, &mut t);
+        let (_, all) = b.until_filled(12_000, &mut t, true);
         println!("  settle   fill: all {}", fill(&all));
         let mut t = Times::default();
         let x0 = b.player.x;
@@ -733,7 +945,7 @@ fn main() {
             b.player.x = x0 + 20.0 * (phase * std::f64::consts::PI).sin();
             b.step(&mut t);
         }
-        report("hover", &t);
+        report("hover", &t, &mut b);
         b.player.x = x0;
     }
 
@@ -743,10 +955,14 @@ fn main() {
         b.player.x += SPRINT_FLIGHT / FPS;
         b.step(&mut t);
     }
-    report("fly", &t);
+    report("fly", &t, &mut b);
     let lines = LINES.lock().unwrap();
-    if let Some(l) = lines.iter().rev().find(|l| l.starts_with("bake:")) {
+    if let Some(l) = lines.iter().rev().find(|l| l.contains("bake:")) {
         println!("  last bake line: {l}");
+    }
+    drop(lines);
+    if std::env::var_os("BENCH_VERIFY").is_some() {
+        b.verify_shared_changes();
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

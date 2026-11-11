@@ -56,20 +56,25 @@ impl Dirty {
         self.0.insert(at, (a, b));
     }
     fn remove(&mut self, (a, b): (u32, u32)) {
-        let mut out = Vec::with_capacity(self.0.len() + 1);
-        for &(x, y) in &self.0 {
-            if y <= a || x >= b {
-                out.push((x, y));
-                continue;
+        let mut at = self.0.partition_point(|&(_, y)| y <= a);
+        while let Some(&(x, y)) = self.0.get(at) {
+            if x >= b {
+                break;
             }
             if x < a {
-                out.push((x, a));
-            }
-            if y > b {
-                out.push((b, y));
+                self.0[at].1 = a;
+                if y > b {
+                    self.0.insert(at + 1, (b, y));
+                    break;
+                }
+                at += 1;
+            } else if y > b {
+                self.0[at].0 = b;
+                break;
+            } else {
+                self.0.remove(at);
             }
         }
-        self.0 = out;
     }
     fn hull(&self) -> Option<(u32, u32)> {
         Some((self.0.first()?.0, self.0.last()?.1))
@@ -85,6 +90,7 @@ impl Dirty {
     }
 }
 
+#[derive(Clone)]
 struct Cached {
     chunk: Chunk,
     /// The map rows `[a, b)` its faces cover now (none: it draws nothing).
@@ -100,6 +106,13 @@ struct Cached {
     /// Each column's map rows, so a repaint skips the columns that miss its
     /// rows without working their faces out.
     cols: Vec<(f64, f64)>,
+}
+
+/// A temporary copy of prepared chunks, including their projection geometry.
+/// Import into a mosaic with the same projection and painter/layer only.
+pub struct CachedChunks {
+    projection: Projection,
+    chunks: BTreeMap<(i32, i32), Cached>,
 }
 
 /// A column that draws nothing.
@@ -128,6 +141,7 @@ fn join(a: Option<(f64, f64)>, b: Option<(f64, f64)>) -> Option<(f64, f64)> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub jobs: u64,
+    pub rows: u64,
     pub columns: u64,
     pub texels: u64,
     pub recentres: u64,
@@ -211,18 +225,22 @@ const WET_SCALE: f32 = 8.0;
 impl Canvas<'_> {
     fn put(&mut self, i: u32, j: u32, y: f32, t: Texel) {
         let at = (j * self.side + i) as usize;
-        if y > self.height[at] {
-            let rgb = t.rgb;
-            self.height[at] = y;
-            self.seen[at] = t.seen;
-            self.wet[at] = (t.water * WET_SCALE).round().clamp(0.0, 255.0) as u8;
-            self.rgba[at * 4..at * 4 + 4].copy_from_slice(&[
-                (rgb >> 16) as u8,
-                (rgb >> 8) as u8,
-                rgb as u8,
-                255,
-            ]);
-            self.stats.texels += 1;
+        let end = at + self.tpb as usize;
+        let rgba = [(t.rgb >> 16) as u8, (t.rgb >> 8) as u8, t.rgb as u8, 255];
+        let wet = (t.water * WET_SCALE).round().clamp(0.0, 255.0) as u8;
+        for (((height, seen), water), px) in self.height[at..end]
+            .iter_mut()
+            .zip(&mut self.seen[at..end])
+            .zip(&mut self.wet[at..end])
+            .zip(self.rgba[at * 4..end * 4].as_chunks_mut::<4>().0)
+        {
+            if y > *height {
+                *height = y;
+                *seen = t.seen;
+                *water = wet;
+                *px = rgba;
+                self.stats.texels += 1;
+            }
         }
     }
 
@@ -252,9 +270,7 @@ impl Canvas<'_> {
                 top.set(t);
             }
             for j in a..b {
-                for k in 0..self.tpb {
-                    self.put(i + k, j, y, t);
-                }
+                self.put(i, j, y, t);
             }
         }
         if f.south_blocks() == 0 {
@@ -267,9 +283,7 @@ impl Canvas<'_> {
             let y = bake::y_on_south(self.proj, v, zf);
             let block = (y.floor() as i32).clamp(f.south_from, f.top);
             let t = shade.south(chunk, col, block, y);
-            for k in 0..self.tpb {
-                self.put(i + k, j, y as f32, t);
-            }
+            self.put(i, j, y as f32, t);
         }
     }
 }
@@ -337,7 +351,13 @@ impl Mosaic {
         m.chunks = std::mem::take(&mut self.chunks);
         m.outline_depth = self.outline_depth;
         m.stats = self.stats;
-        m.repaint_all();
+        let old_half = f64::from(self.side / self.tpb) / 2.0;
+        let half = (side / tpb / 2) as i32;
+        m.u0 = floor_to(f64::from(self.u0) + old_half, 16) - floor_to(f64::from(half), 16);
+        m.v0 =
+            floor_to(f64::from(self.v0) + old_half, ROW_STEP) - floor_to(f64::from(half), ROW_STEP);
+        m.paint_cached();
+        m.upload.fill(Dirty::all(side));
         m
     }
     pub fn projection(&self) -> &Projection {
@@ -382,6 +402,74 @@ impl Mosaic {
     pub fn keys(&self) -> Vec<(i32, i32)> {
         self.chunks.keys().copied().collect()
     }
+    /// Copies selected cache entries without preparing or shading them again.
+    pub fn export_chunks(&self, mut keep: impl FnMut((i32, i32)) -> bool) -> CachedChunks {
+        CachedChunks {
+            projection: self.proj,
+            chunks: self
+                .chunks
+                .iter()
+                .filter(|(k, _)| keep(**k))
+                .map(|(&k, c)| (k, c.clone()))
+                .collect(),
+        }
+    }
+    /// Consumes a temporary mosaic and transfers selected cache entries.
+    /// Unlike exporting, this never makes another copy of the chunk data.
+    pub fn into_chunks(mut self, mut keep: impl FnMut((i32, i32)) -> bool) -> CachedChunks {
+        self.chunks.retain(|&k, _| keep(k));
+        CachedChunks {
+            projection: self.proj,
+            chunks: std::mem::take(&mut self.chunks),
+        }
+    }
+    /// Installs a snapshot, repairing south-neighbour geometry at its edges.
+    /// Returns the imported keys so their pending reads can be cancelled.
+    pub fn import_chunks(&mut self, snapshot: CachedChunks) -> Vec<(i32, i32)> {
+        assert_eq!(self.proj, snapshot.projection);
+        let keys: Vec<_> = snapshot.chunks.keys().copied().collect();
+        for (&key, c) in &snapshot.chunks {
+            for span in [self.chunks.get(&key).and_then(|c| c.span), c.span]
+                .into_iter()
+                .flatten()
+            {
+                self.mark(key.0, span);
+            }
+        }
+        self.chunks.extend(snapshot.chunks);
+        let edges: std::collections::BTreeSet<_> = keys
+            .iter()
+            .flat_map(|&(x, z)| [(x, z), (x, z - 1)])
+            .collect();
+        for key in edges {
+            let mut last = [NO_SPAN; 16];
+            let edge = self.row_spans(key, 15..16, &mut last)[15];
+            if let Some(c) = self.chunks.get_mut(&key) {
+                let old = c.span;
+                c.rows[15] = edge;
+                c.cols[240..].copy_from_slice(&last);
+                c.span = c.rows.iter().copied().fold(None, join);
+                let new = c.span;
+                for span in [old, new].into_iter().flatten() {
+                    self.mark(key.0, span);
+                }
+            }
+        }
+        keys
+    }
+
+    /// A fresh, cleared buffer only needs to paint where cached faces reach it.
+    fn paint_cached(&mut self) {
+        self.paint.fill(Dirty::default());
+        let spans: Vec<_> = self
+            .chunks
+            .iter()
+            .filter_map(|(&(x, _), c)| Some((x, c.span?)))
+            .collect();
+        for (x, span) in spans {
+            self.mark(x, span);
+        }
+    }
     /// Marks the whole image to paint again (the looks changed).
     pub fn repaint_all(&mut self) {
         self.paint.fill(Dirty::all(self.side));
@@ -408,6 +496,14 @@ impl Mosaic {
     }
     pub fn uploading(&self) -> bool {
         self.upload.iter().any(|d| !d.is_empty())
+    }
+    /// Strip rows still awaiting painting, for profiling progress.
+    pub fn dirty_rows(&self) -> u64 {
+        self.paint
+            .iter()
+            .flat_map(|d| &d.0)
+            .map(|&(a, b)| u64::from(b - a))
+            .sum()
     }
     /// The first and last row of strip `s` waiting to be painted.
     pub fn paint_rows(&self, s: u32) -> Option<(u32, u32)> {
@@ -446,15 +542,17 @@ impl Mosaic {
             return out;
         };
         let south = self.chunks.get(&(key.0, key.1 + 1)).map(|s| &s.chunk);
+        let first = zs.start;
         for z in zs {
             for x in 0..16 {
-                cols[z * 16 + x] = NO_SPAN;
+                let col = (z - first) * 16 + x;
+                cols[col] = NO_SPAN;
                 let Some(f) = column_faces(&c.chunk, south, x, z) else {
                     continue;
                 };
                 let s = bake::spans(&self.proj, key.1 * 16 + z as i32, f);
                 let span = (s.top.0, s.top.1.max(s.south.1));
-                cols[z * 16 + x] = span;
+                cols[col] = span;
                 out[z] = join(out[z], Some(span));
             }
         }
@@ -501,11 +599,11 @@ impl Mosaic {
             let c = self.chunks.get_mut(&key).expect("just put");
             (c.span, c.rows, c.cols) = (new_c, rows, cols);
         }
-        let mut last = [NO_SPAN; 256];
+        let mut last = [NO_SPAN; 16];
         let edge = self.row_spans(north, 15..16, &mut last)[15];
         let new_n = self.chunks.get_mut(&north).and_then(|n| {
             n.rows[15] = edge;
-            n.cols[240..].copy_from_slice(&last[240..]);
+            n.cols[240..].copy_from_slice(&last);
             n.span = n.rows.iter().copied().fold(None, join);
             n.span
         });
@@ -610,6 +708,7 @@ impl Mosaic {
             }
         }
         self.stats.jobs += 1;
+        self.stats.rows += u64::from(end - r0);
         true
     }
 
@@ -718,7 +817,7 @@ impl Mosaic {
         if di.abs() >= side || dj.abs() >= side {
             self.rgba.fill(0);
             self.height.fill(f32::NEG_INFINITY);
-            self.paint.fill(Dirty::all(self.side));
+            self.paint_cached();
             return;
         }
         // In place: no new buffers (3.4 MB a recentre is dear in a mod).
@@ -1083,6 +1182,61 @@ mod tests {
     }
 
     #[test]
+    fn copied_prepared_chunks_paint_identically_and_repair_snapshot_edges() {
+        let mut source = scene_mosaic();
+        let mut target = Mosaic::with_texels(*source.projection(), 64, 1);
+        target.recentre(16.0, source.projection().v(64.0, 24.0));
+        // Omit the south neighbours first: importing them later must repair
+        // the already cached north row's faces, including lowered ground.
+        target.import_chunks(source.export_chunks(|(_, z)| z != 2));
+        paint_all(&mut target, &Ids);
+        target.import_chunks(source.export_chunks(|(_, z)| z == 2));
+        paint_all(&mut target, &Ids);
+        let mut fresh = Mosaic::with_texels(*source.projection(), 64, 1);
+        fresh.shift(target.anchor().0, target.anchor().1);
+        world(&mut fresh, 0..2, 0..3, scene);
+        paint_all(&mut fresh, &Ids);
+        assert_eq!(target.pixels(), fresh.pixels());
+        assert_eq!(target.height, fresh.height);
+        // A changed chunk is copied back without modifying the source.
+        world(&mut target, 0..1, 1..2, |_, _| Some(60));
+        source.import_chunks(target.into_chunks(|k| k == (0, 1)));
+        paint_all(&mut source, &Ids);
+        let mut expected = scene_mosaic();
+        world(&mut expected, 0..1, 1..2, |_, _| Some(60));
+        paint_all(&mut expected, &Ids);
+        assert_eq!(source.pixels(), expected.pixels());
+        assert_eq!(source.height, expected.height);
+    }
+
+    #[test]
+    fn resized_and_far_shifted_buffers_match_a_full_repaint_with_outlines() {
+        let mut m = scene_mosaic().resized(128, 1);
+        m.forget_shades();
+        m.shift(16, 8);
+        paint_all(&mut m, &Grey { wet: 3.0 });
+        let expected = m.pixels().to_vec();
+        m.repaint_all();
+        paint_all(&mut m, &Grey { wet: 3.0 });
+        assert_eq!(m.pixels(), expected);
+        let mut uploaded = vec![0; 128 * 128 * 4];
+        while m.take_upload(1024, 0.38, |x, y, w, h, rgba| {
+            for row in 0..h as usize {
+                let at = ((y as usize + row) * 128 + x as usize) * 4;
+                uploaded[at..at + w as usize * 4]
+                    .copy_from_slice(&rgba[row * w as usize * 4..(row + 1) * w as usize * 4]);
+            }
+        }) > 0
+        {}
+        for y in 0..128 {
+            for x in 0..128 {
+                let at = (y * 128 + x) as usize * 4;
+                assert_eq!(&uploaded[at..at + 4], &m.shown_at(x, y, 0.38));
+            }
+        }
+    }
+
+    #[test]
     fn the_focus_is_painted_and_uploaded_first() {
         let p = Projection::default();
         let mut m = Mosaic::new(p, 128);
@@ -1399,13 +1553,17 @@ mod tests {
     }
 
     #[test]
-    fn a_far_jump_clears_and_repaints_everything() {
+    fn a_far_jump_clears_and_only_repaints_cached_faces_in_range() {
         let p = Projection::default();
         let mut m = Mosaic::new(p, 64);
         world(&mut m, 0..2, 0..2, |_, _| Some(64));
         paint_all(&mut m, &Ids);
         m.shift(1600, 800);
-        assert!((0..2).all(|s| m.paint_rows(s) == Some((0, 64))));
+        assert!(
+            !m.painting(),
+            "the cleared image has no cached faces in range"
+        );
+        assert!(m.uploading(), "the cleared pixels still need uploading");
         assert!(m.rgb_at(0, 0).is_none());
     }
 

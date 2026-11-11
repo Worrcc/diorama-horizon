@@ -16,6 +16,18 @@ use crate::bake::{Chunk, Shade, Texel, CLEAR, NO_TOP};
 use crate::looks::{albedo, Kind, Looks};
 use crate::projection::Projection;
 use crate::style::{luminance, Style, Tables};
+use std::cell::Cell;
+
+const FACE_CACHE: usize = 1024;
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FaceKey {
+    state: u32,
+    height: u64,
+    tints: [u32; 3],
+    light: u8,
+    cave: Option<i32>,
+    version: u64,
+}
 
 /// The water path a south face of water is drawn with (a waterfall's side):
 /// the port's own number, deep enough to show the water's colour.
@@ -33,6 +45,9 @@ pub struct Painter {
     pub cave: Option<i32>,
     /// `style.side_lambert()`, kept (it changes only with the style).
     side_lambert: f64,
+    /// Exact dry face colours recur across columns and chunks. A bounded
+    /// direct cache avoids repeating their albedo, lighting and grade.
+    face_cache: Vec<Cell<Option<(FaceKey, u32)>>>,
 }
 
 fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -40,6 +55,39 @@ fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 impl Painter {
+    fn top_rgb(&self, chunk: &Chunk, col: usize, state: u32, y: f64) -> u32 {
+        let key = (chunk.over_at(col)[3] >= 1.0).then(|| FaceKey {
+            state,
+            height: y.to_bits(),
+            tints: chunk.tints_at(col),
+            light: chunk.light.get(col).copied().unwrap_or(0xF0),
+            cave: self.cave,
+            version: self.looks.version,
+        });
+        let slot = key.map(|k| {
+            let h = (k.height ^ (k.height >> 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            ((h >> 54) as usize
+                ^ state.wrapping_mul(0x9E37_79B9) as usize
+                ^ k.tints[0] as usize
+                ^ (k.tints[1] as usize).rotate_left(7)
+                ^ (k.light as usize).rotate_left(3))
+                & (FACE_CACHE - 1)
+        });
+        if let (Some(key), Some(slot)) = (key, slot) {
+            if let Some((old, rgb)) = self.face_cache[slot].get() {
+                if key == old {
+                    return rgb;
+                }
+            }
+        }
+        let c = self.lit(chunk, col, state, true, y);
+        let rgb = self.style.grade(&self.tables, c);
+        if let (Some(key), Some(slot)) = (key, slot) {
+            self.face_cache[slot].set(Some((key, rgb)));
+        }
+        rgb
+    }
+
     pub fn new(looks: Looks, style: Style) -> Painter {
         Painter {
             looks,
@@ -48,6 +96,7 @@ impl Painter {
             tables: Tables::new(),
             cave: None,
             side_lambert: style.side_lambert(),
+            face_cache: vec![Cell::new(None); FACE_CACHE],
         }
     }
 
@@ -56,6 +105,7 @@ impl Painter {
     pub fn set_style(&mut self, style: Style) {
         self.side_lambert = style.side_lambert();
         self.style = style;
+        self.face_cache.fill(Cell::new(None));
     }
 
     /// Lowers each column's top past plants, glass and air to the first block
@@ -170,8 +220,7 @@ impl Shade for Painter {
     fn top(&self, chunk: &Chunk, col: usize, y: f64) -> Texel {
         let s0 = chunk.state(col, 0);
         if self.looks.get(s0).kind != Kind::Water {
-            let c = self.lit(chunk, col, s0, true, y);
-            return Texel::dry(self.style.grade(&self.tables, c), y);
+            return Texel::dry(self.top_rgb(chunk, col, s0, y), y);
         }
         // Water: count it down to the floor (TileBaker.java:1041-1048).
         let d = i32::from(chunk.depth.max(1));
@@ -299,6 +348,37 @@ mod tests {
         }
         c.tints = [0x91_BD59, 0x77_AB2F, 0x3F_76E4].repeat(256);
         c
+    }
+
+    #[test]
+    fn cached_dry_tops_match_exact_shading_across_light_tints_layers_and_styles() {
+        let mut p = painter();
+        for style in [crate::style::DEFAULT, crate::style::FLAT] {
+            p.set_style(style);
+            for cave in [None, Some(72), Some(100)] {
+                p.cave = cave;
+                for n in 0..512u32 {
+                    let state = [1, 2, 6][n as usize % 3];
+                    let mut c = column(&[state], (n % 64 + 32) as i16);
+                    c.light = vec![(n & 255) as u8; 256];
+                    c.tints[0] ^= (n % 7) * 0x01_0101;
+                    let y = f64::from(c.tops[0]) + 1.0;
+                    let rgb = p.style.grade(&p.tables, p.lit(&c, 0, state, true, y));
+                    for _ in 0..2 {
+                        assert_eq!(p.top(&c, 0, y), Texel::dry(rgb, y));
+                    }
+                }
+            }
+        }
+        // Reloads and prepared plant/glass overlays must bypass old colours.
+        p.cave = None;
+        let mut c = column(&[1], 64);
+        let _ = p.top(&c, 0, 65.0);
+        p.looks.version += 1;
+        p.looks.looks[1].top.base ^= 0xFF_FFFF;
+        c.over = vec![[0.1, 0.2, 0.3, 0.5]; 256];
+        let rgb = p.style.grade(&p.tables, p.lit(&c, 0, 1, true, 65.0));
+        assert_eq!(p.top(&c, 0, 65.0), Texel::dry(rgb, 65.0));
     }
 
     fn channels(c: u32) -> [i32; 3] {
