@@ -59,9 +59,7 @@ const DEPTH: u8 = 12;
 /// Block looks built per step of a rebuild.
 const LOOKS_STEP: usize = 2048;
 /// The frame budget asked for (PLAN-v2 section 3.2), in microseconds.
-const BUDGET_US: u32 = 300;
-const CATCHUP_US: u32 = 500;
-const FULLMAP_US: u32 = 4000;
+const BUDGET_US: u32 = budget::PERFORMANCE[0].frame_us;
 /// Texel bytes uploaded per piece at most (pieces are sized to the work
 /// left, M7).
 const UPLOAD_PIECE: usize = 8 * 1024;
@@ -92,6 +90,13 @@ const LETTER_BOX: u32 = 0xA010_1418;
 const BORDER_COLOR: u32 = 0xFF20_2020;
 const ARROW_COLOR: u32 = 0xFFE8_3030;
 const ARROW_OUTLINE: u32 = 0xFF00_0000;
+
+struct Capture {
+    job: diorama_core::mosaic::ChunkCapture,
+    ns: [u8; 16],
+    cut: Option<i32>,
+    style: style::Style,
+}
 
 /// The fill-in clock (M7): from a join, a dimension change or
 /// `/diorama refill`, the time until the map in the box, then every loaded
@@ -233,6 +238,11 @@ struct Diorama {
     /// Prepared (plants and glass looked through) or not yet: each is a
     /// step of its own, a third of the budget or more on Pulley.
     ready: Option<Ready>,
+    /// One complete chunk snapshot; acquisition waits until all its texels are
+    /// captured, including those outside either displayed mosaic.
+    capture: Option<Capture>,
+    capture_left: u32,
+    saved_upload_bytes: usize,
     /// What a row painted and a byte uploaded cost, learnt as they go.
     paint_rate: budget::Rate,
     upload_rate: budget::Rate,
@@ -301,12 +311,13 @@ impl Diorama {
     }
 
     fn update_budget(&mut self) {
+        let limits = budget::performance(self.settings.stored(settings::PERFORMANCE));
         let requested = if self.fullmap.is_some() {
-            FULLMAP_US
+            limits.fullmap_us
         } else if self.backlog() {
-            CATCHUP_US
+            limits.catchup_us
         } else {
-            BUDGET_US
+            limits.frame_us
         };
         if requested == self.requested {
             return;
@@ -452,6 +463,7 @@ impl Diorama {
                     self.shown = None;
                 }
             }
+            settings::PERFORMANCE => self.update_budget(),
             settings::AUTO_CAVES | settings::PREFER_SURFACE => self.layer_tick = 0,
             settings::STYLE => {
                 // The flat style's light and colours, on the default's camera.
@@ -526,7 +538,7 @@ impl Diorama {
     /// Reads the pending chunk the box needs most: one the box shows, else
     /// the nearest `centre`. It waits in `ready` for its own step into the
     /// mosaic. Returns the chunks read.
-    fn fetch(&mut self, centre: (i32, i32), keep_seen: bool) -> usize {
+    fn fetch(&mut self, centre: (i32, i32), keep_seen: bool, player: &game::Player) -> usize {
         let dist = |c: &(i32, i32)| (c.0 - centre.0).abs().max((c.1 - centre.1).abs());
         let key = self.focus_pending(centre);
         let Some(key) = key.or_else(|| self.pending.iter().copied().min_by_key(dist)) else {
@@ -550,8 +562,14 @@ impl Diorama {
                     }
                     chunk
                 });
+                if chunk.is_none() {
+                    self.saved.unavailable_chunks += 1;
+                }
                 if keep_seen && chunk.is_none() && self.mosaic.has(key) {
                     return 1;
+                }
+                if let Some(chunk) = &chunk {
+                    self.start_capture(key, chunk, player);
                 }
                 self.ready = Some(Ready {
                     key,
@@ -559,7 +577,11 @@ impl Diorama {
                     chunk,
                 });
             }
-            Err(e) => horizon_mod_sdk::warn(&format!("prepared-columns: {e}")),
+            Err(e) => {
+                self.saved.failed_chunks += 1;
+                horizon_mod_sdk::warn(&format!("prepared-columns: {e}"));
+                self.pending.insert(key);
+            }
         }
         1
     }
@@ -776,6 +798,66 @@ impl Diorama {
         }
     }
 
+    fn start_capture(&mut self, key: (i32, i32), chunk: &Chunk, player: &game::Player) {
+        if self.saved.stopped() {
+            self.saved.unsaved_chunks += 1;
+            return;
+        }
+        if let Some(job) = self.mosaic.capture_loaded_chunk(key, chunk.clone()) {
+            if let Some(ns) = self.saved.namespace(
+                player,
+                self.cut,
+                self.mosaic.texels_per_block(),
+                self.settings.flat_style(),
+            ) {
+                self.capture = Some(Capture {
+                    job,
+                    ns,
+                    cut: self.cut,
+                    style: self.painter.style,
+                });
+            } else {
+                self.saved.unidentified_chunks += 1;
+                horizon_mod_sdk::warn("explored map: chunk capture skipped: world-id unavailable");
+            }
+        } else {
+            self.saved.empty_chunks += 1;
+        }
+    }
+
+    fn capture_step(&mut self, rows: u32) {
+        if self.saved.stopped() && self.capture.take().is_some() {
+            self.saved.unsaved_chunks += 1;
+        }
+        if !self.saved.can_capture() || self.capture_left == 0 {
+            return;
+        }
+        let rows = rows.min(self.capture_left);
+        if let Some(capture) = &mut self.capture {
+            self.capture_left -= rows;
+            let saved = &mut self.saved;
+            let now = self.clock;
+            let old_cut = std::mem::replace(&mut self.painter.cave, capture.cut);
+            let old_style = self.painter.style;
+            if old_style != capture.style {
+                self.painter.set_style(capture.style);
+            }
+            let done = capture
+                .job
+                .step(&self.painter, rows, |anchor, tpb, rect, rgba| {
+                    saved.capture(capture.ns, anchor, tpb, rect, rgba, now);
+                });
+            self.painter.cave = old_cut;
+            if old_style != self.painter.style {
+                self.painter.set_style(old_style);
+            }
+            if done {
+                self.saved.captured += 1;
+                self.capture = None;
+            }
+        }
+    }
+
     /// Run one budgeted bake/upload on the currently installed mosaic.
     fn bake_frame(
         &mut self,
@@ -786,6 +868,8 @@ impl Diorama {
         player: &game::Player,
     ) -> (bool, usize, usize) {
         let (mut chunks, mut reads, mut focus_uploaded) = (0, 0, 0);
+        let limits = budget::performance(self.settings.stored(settings::PERFORMANCE));
+        let upload_cap = UPLOAD_BYTES.saturating_sub(self.saved_upload_bytes);
         // What drawing the box and the rest of the frame after the bake
         // will cost is kept back too (on Pulley a moving box's draw is a
         // fifth of the budget).
@@ -796,10 +880,18 @@ impl Diorama {
             let capture_room = self.saved.can_capture();
             let waiting = Waiting {
                 rebuild: self.rebuild.is_some(),
-                ready: self.ready.is_some(),
-                pending: !self.pending.is_empty() && (keep_seen || !self.saved.restoring()),
+                ready: (self.ready.is_some() || (self.capture.is_some() && self.capture_left > 0))
+                    && capture_room,
+                pending: !self.pending.is_empty()
+                    && self.capture.is_none()
+                    && capture_room
+                    && reads < limits.chunks
+                    && (keep_seen || !self.saved.restoring()),
                 painting: self.mosaic.painting() && capture_room,
                 focus_pending: self.ready.is_none()
+                    && self.capture.is_none()
+                    && capture_room
+                    && reads < limits.chunks
                     && self.focus_pending(centre).is_some()
                     && (keep_seen || !self.saved.restoring()),
                 focus_painting: self.mosaic.focus_painting() && capture_room,
@@ -826,10 +918,14 @@ impl Diorama {
                     self.rebuild_rate.after(spent(), 1, canvas::work_left());
                 }
                 Step::Read => {
-                    chunks += self.fetch(centre, keep_seen);
+                    chunks += self.fetch(centre, keep_seen, player);
                     reads += 1;
                     self.read_rate.after(spent(), 1, canvas::work_left());
                     self.step_cost(0, spent(), 1);
+                }
+                Step::Set if self.capture.is_some() && self.ready.is_none() => {
+                    self.capture_step(limits.capture_piece_rows);
+                    self.set_rate.after(spent(), 1, canvas::work_left());
                 }
                 Step::Set => match self.ready.take() {
                     Some(Ready {
@@ -838,6 +934,9 @@ impl Diorama {
                         prepared: false,
                     }) => {
                         self.painter.prepare(&mut chunk);
+                        if self.capture.is_none() {
+                            self.start_capture(key, &chunk, player);
+                        }
                         self.ready = Some(Ready {
                             key,
                             chunk: Some(chunk),
@@ -871,7 +970,7 @@ impl Diorama {
                     self.step_cost(3, spent(), painted);
                 }
                 Step::FocusUpload => {
-                    if focus_uploaded >= UPLOAD_BYTES {
+                    if focus_uploaded >= upload_cap {
                         break;
                     }
                     let piece = budget::upload_piece(
@@ -879,7 +978,7 @@ impl Diorama {
                         left,
                         !busy,
                         self.mosaic.side() * 4,
-                        UPLOAD_PIECE.min(UPLOAD_BYTES - focus_uploaded) as u32,
+                        UPLOAD_PIECE.min(upload_cap - focus_uploaded) as u32,
                     );
                     let (image, outline) = (self.image, self.painter.style.outline);
                     let (anchor, tpb) = (self.mosaic.anchor(), self.mosaic.texels_per_block());
@@ -931,7 +1030,7 @@ impl Diorama {
         loop {
             let raw = canvas::work_left();
             let left = raw.saturating_sub(tail);
-            if uploaded >= UPLOAD_BYTES || (!budget::may_upload(left) && (busy || uploaded > 0)) {
+            if uploaded >= upload_cap || (!budget::may_upload(left) && (busy || uploaded > 0)) {
                 break;
             }
             let piece = budget::upload_piece(
@@ -939,7 +1038,7 @@ impl Diorama {
                 left,
                 !busy && uploaded == 0,
                 self.mosaic.side() * 4,
-                UPLOAD_PIECE.min(UPLOAD_BYTES - uploaded) as u32,
+                UPLOAD_PIECE.min(upload_cap - uploaded) as u32,
             );
             let (anchor, tpb) = (self.mosaic.anchor(), self.mosaic.texels_per_block());
             let (cut, flat, now) = (self.cut, self.settings.flat_style(), self.clock);
@@ -948,8 +1047,8 @@ impl Diorama {
                 if let Err(e) = canvas::update_image(image, x, y, w, h, rgba) {
                     failed = Some(e);
                 }
-                // The fullscreen map (keep_seen) shows what the minimap saves;
-                // it does not save a second, coarser copy of its own.
+                // Both mosaics persist complete acquired chunks. HUD uploads
+                // also keep composite backgrounds and visible neighbour repairs.
                 if !keep_seen {
                     saved.capture_rect(anchor, tpb, (x, y, w, h), rgba, player, cut, flat, now);
                 }
@@ -1313,6 +1412,9 @@ impl Mod for Diorama {
             window: None,
             focus_chunks: None,
             ready: None,
+            capture: None,
+            capture_left: 0,
+            saved_upload_bytes: 0,
             paint_rate: budget::Rate::new(PAINT_ROW_GUESS),
             upload_rate: budget::Rate::new(UPLOAD_BYTE_GUESS),
             read_rate: budget::Rate::new(READ_GUESS),
@@ -1364,6 +1466,11 @@ impl Mod for Diorama {
                     self.saved.encode_pixels,
                     self.saved.encode_work as f64 * 256.0 / (budget::WORK_SCALE as f64 * self.saved.encode_pixels.max(1) as f64),
                     self.saved.pending()
+                ));
+                horizon_mod_sdk::info(&format!(
+                    "explored chunks: {} captured; {} empty; {} unavailable; {} read errors (retried); {} without world-id; {} skipped after storage stopped; capture pending {}",
+                    self.saved.captured, self.saved.empty_chunks, self.saved.unavailable_chunks,
+                    self.saved.failed_chunks, self.saved.unidentified_chunks, self.saved.unsaved_chunks, self.capture.is_some()
                 ));
                 self.step_work = [0; 5];
                 self.step_units = [0; 5];
@@ -1542,11 +1649,13 @@ impl Mod for Diorama {
         if player.is_none() && self.dimension.take().is_some() {
             self.reset();
         }
-        self.saved.step(
-            self.clock,
-            self.pending.is_empty() && !self.mosaic.painting(),
-            self.granted,
-        );
+        let limits = budget::performance(self.settings.stored(settings::PERFORMANCE));
+        self.saved_upload_bytes = 0;
+        self.capture_left = limits.capture_rows;
+        self.saved.step(self.granted, limits);
+        // Finish an already acquired chunk even with the HUD hidden or after
+        // leaving the world. Its namespace was frozen at acquisition.
+        self.capture_step(limits.capture_piece_rows);
         let Some(p) = player else {
             if self.shown.take().is_some() {
                 canvas::clear_corner();
@@ -1572,8 +1681,14 @@ impl Mod for Diorama {
             self.cost
                 .recentre(before.saturating_sub(canvas::work_left()));
         }
-        self.saved
-            .restore_hud(&mut self.mosaic, &p, self.cut, self.settings.flat_style());
+        for _ in 0..limits.tile_loads {
+            if !self
+                .saved
+                .restore_hud(&mut self.mosaic, &p, self.cut, self.settings.flat_style())
+            {
+                break;
+            }
+        }
         let (busy, chunks, uploaded) = self.bake_frame(centre, u, busy, false, &p);
         let before = canvas::work_left();
         self.draw(&p);

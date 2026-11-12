@@ -19,27 +19,33 @@ pub struct Setting {
 const ON_OFF: &[(&str, &str)] = &[("true", "ON"), ("false", "OFF")];
 
 pub const MINIMAP: usize = 0;
-pub const CORNER: usize = 1;
-pub const SIZE: usize = 2;
-pub const ZOOM: usize = 3;
-pub const OPACITY: usize = 4;
-pub const SHAPE: usize = 5;
-pub const AUTO_CAVES: usize = 6;
-pub const PREFER_SURFACE: usize = 7;
-pub const COORDINATES: usize = 8;
-pub const BIOME: usize = 9;
-pub const COMPASS: usize = 10;
-pub const GAME_TIME: usize = 11;
-pub const STYLE: usize = 12;
-pub const WAYPOINTS_ON_MAP: usize = 13;
-pub const DEATH_MARKERS: usize = 14;
-pub const WAYPOINT_DISTANCE: usize = 15;
+pub const PERFORMANCE: usize = 1;
+pub const CORNER: usize = 2;
+pub const SIZE: usize = 3;
+pub const ZOOM: usize = 4;
+pub const OPACITY: usize = 5;
+pub const SHAPE: usize = 6;
+pub const AUTO_CAVES: usize = 7;
+pub const PREFER_SURFACE: usize = 8;
+pub const COORDINATES: usize = 9;
+pub const BIOME: usize = 10;
+pub const COMPASS: usize = 11;
+pub const GAME_TIME: usize = 12;
+pub const STYLE: usize = 13;
+pub const WAYPOINTS_ON_MAP: usize = 14;
+pub const DEATH_MARKERS: usize = 15;
+pub const WAYPOINT_DISTANCE: usize = 16;
 
-pub const SETTINGS: [Setting; 16] = [
+pub const SETTINGS: [Setting; 17] = [
     Setting {
         key: "minimap",
         label: "Minimap",
         values: ON_OFF,
+    },
+    Setting {
+        key: "performance",
+        label: "Performance (CPU / battery)",
+        values: &[("speedy", "Speedy"), ("performant", "Performant")],
     },
     Setting {
         key: "corner",

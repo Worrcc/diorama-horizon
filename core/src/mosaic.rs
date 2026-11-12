@@ -115,6 +115,54 @@ pub struct CachedChunks {
     chunks: BTreeMap<(i32, i32), Cached>,
 }
 
+/// An undrawn chunk's complete projected span, rendered in small square bands.
+/// It owns a prepared snapshot of its strip, so scrolling or unloading cannot
+/// discard a chunk halfway through capture. No world reads or uploads occur.
+pub struct ChunkCapture {
+    mosaic: Mosaic,
+    end: i32,
+    band: i32,
+}
+impl ChunkCapture {
+    /// Advances at most `rows` of painting. Calls `put` with final, outlined
+    /// texels when a band is complete. Returns true after the last band.
+    pub fn step(
+        &mut self,
+        shade: &impl Shade,
+        rows: u32,
+        mut put: impl FnMut((i32, i32), u32, (u32, u32, u32, u32), &[u8]),
+    ) -> bool {
+        self.mosaic.paint_step(shade, self.mosaic.u0 as f64, rows);
+        if self.mosaic.painting() {
+            return false;
+        }
+        let anchor = self.mosaic.anchor();
+        let tpb = self.mosaic.tpb;
+        let halo = self.band / 2;
+        let bytes = (self.mosaic.side * self.mosaic.side * 4) as usize;
+        self.mosaic
+            .take_upload(bytes, shade.outline(), |x, y, w, h, rgba| {
+                let x1 = (x + w).min(16 * tpb);
+                let y0 = y.max(halo as u32 * tpb);
+                let y1 = (y + h).min((halo + self.band) as u32 * tpb);
+                if x >= x1 || y0 >= y1 {
+                    return;
+                }
+                let mut crop = Vec::with_capacity(((x1 - x) * (y1 - y0) * 4) as usize);
+                for row in y0..y1 {
+                    let at = ((row - y) * w * 4) as usize;
+                    crop.extend_from_slice(&rgba[at..at + ((x1 - x) * 4) as usize]);
+                }
+                put(anchor, tpb, (x, y0, x1 - x, y1 - y0), &crop);
+            });
+        if self.mosaic.v0 + halo + self.band >= self.end {
+            return true;
+        }
+        self.mosaic.shift(0, self.band);
+        false
+    }
+}
+
 /// A column that draws nothing.
 const NO_SPAN: (f64, f64) = (f64::INFINITY, f64::NEG_INFINITY);
 
@@ -615,6 +663,39 @@ impl Mosaic {
         for s in [old_c, new_c, old_n, new_n].into_iter().flatten() {
             self.mark(key.0, s);
         }
+    }
+
+    /// Captures every face of this loaded chunk, including faces outside this
+    /// mosaic's image. Use the same prepared chunks, painter and density as the
+    /// drawing path; nearby chunks in its strip keep occlusion consistent.
+    pub fn capture_chunk(&self, key: (i32, i32)) -> Option<ChunkCapture> {
+        self.capture_loaded_chunk(key, self.chunks.get(&key)?.chunk.clone())
+    }
+
+    /// Snapshot a prepared read before it is installed in a displayed mosaic.
+    /// Acquired data remains capturable even if a teleport drops that read.
+    pub fn capture_loaded_chunk(&self, key: (i32, i32), chunk: Chunk) -> Option<ChunkCapture> {
+        let band = 16;
+        let mut mosaic = Mosaic::with_texels(self.proj, (band * 2) as u32 * self.tpb, self.tpb);
+        mosaic.outline_depth = self.outline_depth;
+        mosaic.chunks = self
+            .chunks
+            .iter()
+            .filter(|(k, _)| k.0 == key.0 && **k != key)
+            .map(|(k, c)| (*k, c.clone()))
+            .collect();
+        mosaic.set_chunk(key, Some(chunk));
+        let (a, b) = mosaic.chunks.get(&key)?.span?;
+        mosaic.u0 = key.0 * 16;
+        // A halo above and below each band keeps outlines identical at band
+        // seams. Only the central band is emitted to the explored store.
+        mosaic.v0 = a.floor() as i32 - band / 2;
+        mosaic.paint_cached();
+        Some(ChunkCapture {
+            mosaic,
+            end: b.ceil() as i32,
+            band,
+        })
     }
 
     /// Drops cached chunks more than `radius` chunks from `centre` (they stay
@@ -1179,6 +1260,52 @@ mod tests {
         } else {
             base + (n % 3) as i16
         })
+    }
+
+    #[test]
+    fn undrawn_capture_matches_a_complete_bake_across_band_seams() {
+        struct Outlined;
+        impl Shade for Outlined {
+            fn top(&self, c: &Chunk, col: usize, y: f64) -> Texel {
+                Ids.top(c, col, y)
+            }
+            fn south(&self, c: &Chunk, col: usize, block: i32, y: f64) -> Texel {
+                Ids.south(c, col, block, y)
+            }
+            fn outline(&self) -> f32 {
+                0.38
+            }
+        }
+        for density in [1, 2] {
+            let mut m = Mosaic::with_texels(Projection::default(), 512, density);
+            let key = (-10, -10);
+            let chunk = Chunk::from_fn(1, |x, z| Some((64 + (z * 9 + x) as i16, 0x336699)));
+            m.set_chunk(key, Some(chunk));
+            let mut job = m.capture_chunk(key).unwrap();
+            let start = job.mosaic.v0;
+            m.shift(key.0 * 16, start);
+            paint_all(&mut m, &Outlined);
+            let mut count = 0;
+            let mut done = false;
+            for _ in 0..1000 {
+                done = job.step(&Outlined, 8, |anchor, tpb, (x, y, w, h), rgba| {
+                    assert_eq!(tpb, density);
+                    for j in 0..h {
+                        for i in 0..w {
+                            let row = ((anchor.1 - start) * density as i32) as u32 + y + j;
+                            let expected = m.shown_at(x + i, row, 0.38);
+                            let at = ((j * w + i) * 4) as usize;
+                            assert_eq!(&rgba[at..at + 4], expected);
+                            count += usize::from(expected[3] != 0);
+                        }
+                    }
+                });
+                if done {
+                    break;
+                }
+            }
+            assert!(done && count > 0);
+        }
     }
 
     #[test]

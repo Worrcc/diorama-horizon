@@ -11,6 +11,62 @@
 //! cost is at most the budget plus the dearest step past the reserve it
 //! started above; the tests pin that.
 
+/// All user-tunable per-frame limits. Counts are shared by the HUD, fullscreen
+/// map and undrawn-chunk capture; changing the setting takes effect next frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Performance {
+    pub frame_us: u32,
+    pub catchup_us: u32,
+    pub fullmap_us: u32,
+    pub chunks: u32,
+    pub tile_loads: usize,
+    pub tile_saves: usize,
+    pub capture_rows: u32,
+    pub capture_piece_rows: u32,
+    pub prefetch_tiles: usize,
+    pub saved_side: u32,
+    pub saved_rows: u32,
+    pub saved_steps: usize,
+    pub saved_keep: u64,
+}
+
+pub const PERFORMANCE: [Performance; 2] = [
+    Performance {
+        frame_us: 1000,
+        catchup_us: 2000,
+        fullmap_us: 6000,
+        chunks: 4,
+        tile_loads: 8,
+        tile_saves: 8,
+        capture_rows: 128,
+        capture_piece_rows: 32,
+        prefetch_tiles: 4,
+        saved_side: 256,
+        saved_rows: 8,
+        saved_steps: 512,
+        saved_keep: 600_000,
+    },
+    Performance {
+        frame_us: 300,
+        catchup_us: 500,
+        fullmap_us: 2000,
+        chunks: 1,
+        tile_loads: 2,
+        tile_saves: 2,
+        capture_rows: 32,
+        capture_piece_rows: 8,
+        prefetch_tiles: 1,
+        saved_side: 256,
+        saved_rows: 4,
+        saved_steps: 128,
+        saved_keep: 750_000,
+    },
+];
+
+pub fn performance(value: &str) -> Performance {
+    PERFORMANCE[usize::from(value == "performant")]
+}
+
 /// `work-left` at the start of a frame call.
 pub const WORK_SCALE: u64 = 1_000_000;
 /// Work kept back for the upload and the corner box.
@@ -630,5 +686,27 @@ mod tests {
             Cost::default().line(300).split(',').nth(1),
             Some(" avg 0 us/frame")
         );
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use crate::settings::{Settings, PERFORMANCE as SETTING};
+
+    #[test]
+    fn speedy_is_default_and_all_budgets_change_live() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.stored(SETTING), "speedy");
+        let fast = performance(settings.stored(SETTING));
+        assert_eq!(fast, performance("invalid"));
+        settings.cycle(SETTING);
+        let slow = performance(settings.stored(SETTING));
+        assert!(fast.frame_us > slow.frame_us && fast.catchup_us > slow.catchup_us);
+        assert!(fast.fullmap_us > slow.fullmap_us && fast.chunks > slow.chunks);
+        assert!(fast.tile_loads > slow.tile_loads && fast.tile_saves > slow.tile_saves);
+        assert!(fast.capture_rows > slow.capture_rows && fast.prefetch_tiles > slow.prefetch_tiles);
+        let loaded = Settings::load(|key| (key == "performance").then(|| "performant".into()));
+        assert_eq!(performance(loaded.stored(SETTING)), slow);
     }
 }

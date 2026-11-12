@@ -53,13 +53,12 @@ pub struct FullMap {
     /// Saved tiles still to find in the view; none when the scan is done.
     saved_queue: Option<crate::explored::Scan>,
     saved_job: Option<SavedPaint>,
+    saved_waiting: Option<crate::explored::TileId>,
+    saved_revision: u64,
 }
 
-/// Work kept for the bake when saved tiles are painted first (`work-left`
-/// units of [`diorama_core::budget::WORK_SCALE`]).
-const SAVED_KEEP: u64 = 600_000;
-
 enum SavedStep {
+    Waiting,
     /// No job and the scan is over (or no saved layer).
     Done,
     /// Looked for the next tile, or a job had no rows left: try again.
@@ -71,6 +70,7 @@ enum SavedStep {
 struct SavedPaint {
     id: ([u8; 16], i32, i32, u32),
     rgba: Vec<u8>,
+    side: u32,
     row: u32,
     end: u32,
     x0: u32,
@@ -213,6 +213,8 @@ impl Diorama {
             saved_rgba: Vec::new(),
             saved_queue: None,
             saved_job: None,
+            saved_waiting: None,
+            saved_revision: 0,
         });
         if let Some(r) = &self.ready {
             self.fullmap
@@ -364,20 +366,19 @@ impl Diorama {
     }
 
     /// Composite saved tiles into one canvas covering the whole camera view.
-    /// At most eight rows are resampled per frame, then uploaded as a native
-    /// whole-width slice. This also stays within the host's image texel cap.
-    /// Paints saved tiles into the fullscreen map's saved layer while the
-    /// frame has work left above [`SAVED_KEEP`] (the bake after it gets the
-    /// rest), then uploads the rows it touched in one go.
+    /// Resample rows under the selected performance limits, then upload one
+    /// whole-width slice. The selected reserve leaves work for the live bake;
+    /// its upload also shares the hook's byte allowance with this saved layer.
     fn saved_fullmap_step(&mut self, p: &game::Player) {
         let mut rows: Option<(u32, u32)> = None;
         // Bounded: each pass paints rows or scans 64 grid cells.
-        for _ in 0..4096 {
-            if canvas::work_left() < SAVED_KEEP {
+        let limits = budget::performance(self.settings.stored(settings::PERFORMANCE));
+        for _ in 0..limits.saved_steps {
+            if canvas::work_left() < limits.saved_keep {
                 break;
             }
             match self.saved_fullmap_job(p) {
-                SavedStep::Done => break,
+                SavedStep::Done | SavedStep::Waiting => break,
                 SavedStep::Scanning => {}
                 SavedStep::Painted(a, b) => {
                     rows = Some(rows.map_or((a, b), |(x, y)| (x.min(a), y.max(b))));
@@ -388,6 +389,7 @@ impl Diorama {
         let Some(f) = &mut self.fullmap else { return };
         let Some(image) = f.saved_image else { return };
         let row_bytes = f.saved_size.0 as usize * 4;
+        self.saved_upload_bytes += (f.saved_size.0 * (b - a) * 4) as usize;
         let _ = canvas::update_image(
             image,
             0,
@@ -406,18 +408,50 @@ impl Diorama {
             return SavedStep::Done;
         };
         let gui = render::gui_size();
+        let limits = budget::performance(self.settings.stored(settings::PERFORMANCE));
         if f.saved_view != Some((f.view, gui)) {
-            if let Some(image) = f.saved_image.take() {
-                canvas::drop_image(image);
-            }
-            f.saved_size = (
-                gui.0.clamp(1.0, 512.0) as u32,
-                gui.1.clamp(1.0, 512.0) as u32,
+            let size = (
+                gui.0.clamp(1.0, limits.saved_side as f32) as u32,
+                gui.1.clamp(1.0, limits.saved_side as f32) as u32,
             );
-            f.saved_image = canvas::create_image(f.saved_size.0, f.saved_size.1).ok();
-            f.saved_rgba
-                .resize((f.saved_size.0 * f.saved_size.1 * 4) as usize, 0);
-            f.saved_rgba.fill(0);
+            let old = f.saved_view;
+            let pixels = old.map_or_else(
+                || vec![0; (size.0 * size.1 * 4) as usize],
+                |(view, gui)| {
+                    diorama_core::fullmap::retained_layer(
+                        (view, gui, f.saved_size, &f.saved_rgba),
+                        f.view,
+                        render::gui_size(),
+                        size,
+                    )
+                },
+            );
+            if size != f.saved_size {
+                if let Some(image) = f.saved_image.take() {
+                    canvas::drop_image(image);
+                }
+                f.saved_image = canvas::create_image(size.0, size.1).ok();
+            }
+            f.saved_size = size;
+            f.saved_rgba = pixels;
+            if let Some(image) = f.saved_image {
+                self.saved_upload_bytes += f.saved_rgba.len();
+                let _ = canvas::update_image(image, 0, 0, size.0, size.1, &f.saved_rgba);
+            }
+            if let Some((view, _)) = old {
+                self.saved.prefetch(
+                    p,
+                    f.cut,
+                    self.settings.flat_style(),
+                    &f.view,
+                    gui,
+                    (
+                        f.view.centre_u - view.centre_u,
+                        f.view.centre_v - view.centre_v,
+                    ),
+                    limits.prefetch_tiles,
+                );
+            }
             f.saved_view = Some((f.view, gui));
             f.saved_queue =
                 Some(
@@ -425,14 +459,31 @@ impl Diorama {
                         .visible(p, f.cut, self.settings.flat_style(), &f.view, gui),
                 );
             f.saved_job = None;
+            f.saved_waiting = None;
+            f.saved_revision = self.saved.revision;
             f.drawn = None;
+        }
+        if f.saved_queue.is_none()
+            && f.saved_job.is_none()
+            && f.saved_waiting.is_none()
+            && f.saved_revision != self.saved.revision
+        {
+            f.saved_revision = self.saved.revision;
+            f.saved_queue =
+                Some(
+                    self.saved
+                        .visible(p, f.cut, self.settings.flat_style(), &f.view, gui),
+                );
         }
         if f.saved_image.is_none() {
             return SavedStep::Done;
         }
         let side = diorama_core::explored::SIDE;
+        if let Some(scan) = &f.saved_queue {
+            self.saved.warm_scan(scan, limits.tile_loads);
+        }
         if f.saved_job.is_none() {
-            let next = match &mut f.saved_queue {
+            let next = f.saved_waiting.take().or_else(|| match &mut f.saved_queue {
                 Some(scan) => {
                     let (done, id) = scan.step(&self.saved);
                     if done {
@@ -441,7 +492,7 @@ impl Diorama {
                     id
                 }
                 None => None,
-            };
+            });
             if let Some(id) = next {
                 let a = f.view.map_to_screen(
                     (
@@ -467,15 +518,19 @@ impl Diorama {
                         .ceil()
                         .clamp(0.0, f.saved_size.1 as f32) as u32
                 };
-                if let Some(rgba) = self.saved.tile(id) {
+                if let Some((side, rgba)) = self.saved.tile(id) {
                     f.saved_job = Some(SavedPaint {
                         id,
                         rgba: rgba.to_vec(),
+                        side,
                         row: y(a.1),
                         end: y(b.1),
                         x0: x(a.0),
                         x1: x(b.0),
                     });
+                } else if self.saved.waiting(id) {
+                    f.saved_waiting = Some(id);
+                    return SavedStep::Waiting;
                 }
             }
         }
@@ -486,7 +541,7 @@ impl Diorama {
                 SavedStep::Done
             };
         };
-        let end = (job.row + 8).min(job.end);
+        let end = (job.row + limits.saved_rows).min(job.end);
         let row_bytes = f.saved_size.0 as usize * 4;
         for j in job.row..end {
             for i in job.x0..job.x1 {
@@ -502,9 +557,12 @@ impl Diorama {
                 if !(0..side as i32).contains(&x) || !(0..side as i32).contains(&y) {
                     continue;
                 }
-                let src = (y as usize * side as usize + x as usize) * 4;
+                let src = (((y as u32 * job.side / side) * job.side + x as u32 * job.side / side)
+                    * 4) as usize;
                 let at = j as usize * row_bytes + i as usize * 4;
-                f.saved_rgba[at..at + 4].copy_from_slice(&job.rgba[src..src + 4]);
+                if job.rgba[src + 3] != 0 {
+                    f.saved_rgba[at..at + 4].copy_from_slice(&job.rgba[src..src + 4]);
+                }
             }
         }
         let painted = (job.row, end);
@@ -570,7 +628,15 @@ impl Diorama {
             })
         };
         let mut out = vec![fill(0.0, 0.0, gui.0, gui.1, 0xFF28_2828)];
-        if let Some(image) = f.saved_image {
+        if let (Some(image), Some((view, old_gui))) = (f.saved_image, f.saved_view) {
+            // Pointer events can redraw before the next budgeted resample.
+            // Keep that last image attached to its map coordinates meanwhile.
+            let a = f
+                .view
+                .map_to_screen(view.screen_to_map((0.0, 0.0), old_gui), gui);
+            let b = f
+                .view
+                .map_to_screen(view.screen_to_map(old_gui, old_gui), gui);
             out.push(Shape::Image(ImageShape {
                 image,
                 src: Rect {
@@ -580,10 +646,10 @@ impl Diorama {
                     h: f.saved_size.1 as f32,
                 },
                 dst: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: gui.0,
-                    h: gui.1,
+                    x: a.0,
+                    y: a.1,
+                    w: b.0 - a.0,
+                    h: b.1 - a.1,
                 },
                 tint: 0xFFFF_FFFF,
                 round: false,

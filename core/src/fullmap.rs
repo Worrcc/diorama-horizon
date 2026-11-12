@@ -167,6 +167,42 @@ impl MapView {
     }
 }
 
+/// Reproject the last drawn saved layer when the camera changes. Overlapping
+/// terrain survives until queued tiles arrive, including through zoom changes.
+/// Newly arriving transparent tile pixels must likewise leave this copy intact.
+pub fn retained_layer(
+    old: (MapView, (f32, f32), (u32, u32), &[u8]),
+    view: MapView,
+    gui: (f32, f32),
+    size: (u32, u32),
+) -> Vec<u8> {
+    let (previous, old_gui, old_size, rgba) = old;
+    let mut out = vec![0; (size.0 * size.1 * 4) as usize];
+    if old_size.0 == 0 || old_size.1 == 0 {
+        return out;
+    }
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let uv = view.screen_to_map(
+                (
+                    (x as f32 + 0.5) / size.0 as f32 * gui.0,
+                    (y as f32 + 0.5) / size.1 as f32 * gui.1,
+                ),
+                gui,
+            );
+            let p = previous.map_to_screen(uv, old_gui);
+            let a = (p.0 / old_gui.0 * old_size.0 as f32).floor() as i32;
+            let b = (p.1 / old_gui.1 * old_size.1 as f32).floor() as i32;
+            if a >= 0 && b >= 0 && a < old_size.0 as i32 && b < old_size.1 as i32 {
+                let src = ((b as u32 * old_size.0 + a as u32) * 4) as usize;
+                let dst = ((y * size.0 + x) * 4) as usize;
+                out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +339,31 @@ mod tests {
             Some(1)
         );
         assert_eq!(v.pin_hit(&[(0.0, 0.0)], (90.0, 90.0), screen, 5.0), None);
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn a_tile_miss_after_drag_or_zoom_never_clears_drawn_overlap() {
+        let old = MapView::default();
+        let gui = (8.0, 8.0);
+        let pixels = [13, 24, 35, 255].repeat(64);
+        let mut new = old;
+        new.pan_by(-2.0, 0.0);
+        let kept = retained_layer((old, gui, (8, 8), &pixels), new, gui, (8, 8));
+        for row in kept.as_chunks::<32>().0 {
+            assert!(row[..24]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [13, 24, 35, 255]));
+            assert!(row[24..].iter().all(|v| *v == 0));
+        }
+        new.scale = 2.0;
+        new.centre_u = 0.0;
+        let kept = retained_layer((old, gui, (8, 8), &pixels), new, gui, (8, 8));
+        assert_eq!(kept, pixels);
     }
 }
